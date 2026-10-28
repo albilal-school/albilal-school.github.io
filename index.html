@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f6b4f">
+<meta name="description" content="Albilal School System - offline student test records">
+<title>Albilal School System</title>
+<link rel="manifest" id="manifestLink" href="manifest.webmanifest">
+<link rel="icon" id="favicon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="topbar no-print">
+  <button id="menuBtn" class="menu-btn hidden" aria-label="Menu" aria-controls="nav">☰</button>
+  <div class="brand"><img id="brandLogo" src="icons/icon-192.png" alt="logo"><div><b id="brandName">Albilal School System</b><small>Matric Test Record · <span class="ur">ٹیسٹ ریکارڈ</span></small></div></div>
+  <div class="status"><span id="netStatus" class="pill">…</span><span id="syncStatus" class="pill"></span><span id="whoami" class="who"></span><button id="bell" class="bell hidden" title="Announcements" aria-label="Announcements">🔔<span id="bellCount" class="nbadge hidden"></span></button></div>
+</header>
+<nav id="nav" class="nav no-print hidden">
+  <button data-view="home" data-who="teacher">🏠 Home</button>
+  <button data-view="entry" data-who="teacher">➕ New Test</button>
+  <button data-view="tests" data-who="teacher">📋 Tests</button>
+  <button data-view="tdash" data-who="teacher">📊 Class Insights</button>
+  <button data-view="sdash" data-who="teacher">🎓 Student Insights</button>
+  <button data-view="mine" data-who="student">🎓 My Results</button>
+  <button data-view="honor">🏅 Honor Board</button>
+  <button data-view="notes">📚 Notes <span id="notesBadge" class="nbadge hidden"></span></button>
+  <button data-view="chat">💬 Class Chat</button>
+  <button data-view="ann">📢 Announcements</button>
+  <button data-view="report" data-who="teacher">🗓️ Reports</button>
+  <button data-view="card">🖨️ Result Card</button>
+  <button data-view="admin" id="navAdmin" data-who="teacher">🛡️ Admin</button>
+  <button data-view="settings" data-who="teacher">⚙️ Settings</button>
+  <button data-view="account" data-who="student">👤 Account</button>
+  <button data-view="contact">📞 Contact</button>
+</nav>
+<div id="annBanner" class="no-print"></div>
+<main id="app"></main>
+<footer class="foot"><div id="footWa" class="no-print"></div>Developed by Toshan Rafiq</footer>
+<div id="toast" class="toast no-print"></div>
+<script type="module" src="app.js"></script>
+<noscript>Please enable JavaScript.</noscript>
+</body>
+</html>
