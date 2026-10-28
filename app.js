@@ -21,7 +21,11 @@ function grade(p) {
   if (p == null) return '–';
   return p >= 80 ? 'A+' : p >= 70 ? 'A' : p >= 60 ? 'B' : p >= 50 ? 'C' : p >= 40 ? 'D' : p >= 33 ? 'E' : 'F';
 }
-function gradeBadge(p) { const g = grade(p); const cls = g === 'F' ? 'bad' : (g === 'E' || g === 'D') ? 'warn' : ''; return `<span class="badge ${cls}">${g}</span>`; }
+/* pass rule: pass_percent (default 40) per subject, optional per-subject override; leave = neither pass nor fail */
+const passMark = subj => { const st = (db && db.settings) || {}, o = (st.passOverrides || {})[subj]; return Number(o) > 0 ? Number(o) : Number(st.passPercent) > 0 ? Number(st.passPercent) : 40; };
+const isPass = (p, subj) => p != null && !isNaN(p) && p + 1e-9 >= passMark(subj);
+const passBadge = (p, subj) => p == null || isNaN(p) ? '' : isPass(p, subj) ? '<span class="badge pf pass">Pass</span>' : '<span class="badge pf fail">Fail</span>';
+function gradeBadge(p, subj) { const g = grade(p); if (g === '–') return '–'; const cls = g === 'F' ? 'bad' : (g === 'E' || g === 'D') ? 'warn' : ''; return `<span class="badge ${cls}">${g}</span> ${passBadge(p, subj)}`; }
 function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove('show'), 2600); }
 function weekRange(s) { const d = parseD(s); const dow = (d.getDay() + 6) % 7; const start = addDays(s, -dow); return [start, addDays(start, 6)]; }
 function monthRange(s) { const d = parseD(s); return [ymd(new Date(d.getFullYear(), d.getMonth(), 1)), ymd(new Date(d.getFullYear(), d.getMonth() + 1, 0))]; }
@@ -62,10 +66,10 @@ const DEFAULT_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyA7VQFk3216
 function freshDB() {
   return {
     classes: [{grade: '9th', section: 'Boys'}, {grade: '9th', section: 'Girls'}, {grade: '10th', section: 'Boys'}, {grade: '10th', section: 'Girls'}],
-    subjects: ['English', 'Urdu', 'Mathematics', 'Physics', 'Chemistry', 'Biology', 'Computer Science', 'Islamiat', 'Pakistan Studies', 'Tarjama-tul-Quran'],
-    users: [], students: {}, tests: [], deleted: [], notes: [], deletedNotes: [], chat: {}, chatQueue: [], announcements: [], deletedAnn: [], approvalQueue: [], deletedStudents: [],
+    subjects: ['English', 'Urdu', 'Mathematics', 'Physics', 'Chemistry', 'Biology', 'Islamiat', 'Pakistan Studies', 'Tarjama-tul-Quran'],
+    users: [], students: {}, tests: [], deleted: [], notes: [], deletedNotes: [], chat: {}, chatQueue: [], announcements: [], deletedAnn: [], approvalQueue: [], deletedStudents: [], pendingSubjects: [], subjectMeta: {}, publicHonor: [],
     settings: {schoolName: DEFAULT_NAME, logo: '', scriptUrl: DEFAULT_SCRIPT_URL, settingsDirty: false, rosterDirty: false, lastSync: '', lastPull: '', notesSeen: {}, annSeen: {}, honorLimit: 7,
-      teachersCanAnnounce: 'no', serverHasOwner: false, reportKey: '', contact: {...DEFAULT_CONTACT}}
+      teachersCanAnnounce: 'no', passPercent: 40, passOverrides: {}, serverHasOwner: false, reportKey: '', contact: {...DEFAULT_CONTACT}}
   };
 }
 let db;
@@ -83,6 +87,7 @@ const isAdmin = isOwner; // the owner is the school admin
 const approved = u => u && (u.role === 'owner' || u.status === 'approved');
 const getToken = () => localStorage.getItem(TOKEN_KEY) || '';
 const hasOwner = () => db.users.some(u => u.role === 'owner') || db.settings.serverHasOwner;
+const canEditTest = t => isAdmin() || myClasses().includes(testCk(t)); // server enforces the same rule (class assignment)
 const myClasses = () => { const m = me(); const all = db.classes.map(ck); return m && m.classes && m.classes.length ? all.filter(c => m.classes.includes(c)) : all; };
 const mySubjects = () => { const m = me(); return m && m.subjects && m.subjects.length ? db.subjects.filter(s => m.subjects.includes(s)) : db.subjects; };
 const allClassKeys = () => [...new Set([...db.classes.map(ck), ...db.tests.map(testCk)])];
@@ -109,14 +114,14 @@ function applyBranding() {
 function pendingCount() {
   return db.tests.filter(t => !t.synced).length + db.deleted.length + (db.settings.settingsDirty ? 1 : 0) + (db.settings.rosterDirty ? 1 : 0) + db.notes.filter(n => !n.synced).length +
     db.deletedNotes.length + db.users.filter(u => u.regQueued || u.ownerQueued || u.profileDirty).length + db.approvalQueue.length + db.chatQueue.length +
-    db.announcements.filter(a => !a.synced).length + db.deletedAnn.length + db.deletedStudents.length;
+    db.announcements.filter(a => !a.synced).length + db.deletedAnn.length + db.deletedStudents.length + db.pendingSubjects.length;
 }
 function updateStatus() {
   const on = navigator.onLine; const n = $('#netStatus'); if (!n || !db) return;
   n.textContent = on ? '● Online' : '● Offline'; n.classList.toggle('off', !on);
   const p = pendingCount();
   $('#syncStatus').textContent = !db.settings.scriptUrl ? 'Local mode' : p ? `⟳ ${p} to sync` : '✓ Synced';
-  const m = sessionUser(); $('#whoami').textContent = m ? `${m.name}${m.role === 'owner' ? ' (Owner)' : m.role === 'student' ? ` (${m.cls} #${m.roll})` : ''}` : '';
+  const m = sessionUser(); $('#whoami').textContent = m ? whoText(m) : '';
   updateBell();
 }
 function flatRows(t) {
@@ -152,18 +157,28 @@ async function syncNow(manual) {
     // 2) owner approvals
     for (const q of db.approvalQueue.slice()) { const r = await postJSON(url, {action: 'approve', username: q.username, status: q.status}); if (r.ok || !r.auth) db.approvalQueue.shift(); if (!r.ok) toast(r.error); }
     if (u.profileDirty) { const r = await postJSON(url, {action: 'profile', name: u.name, phone: u.phone || '', email: u.email || '', subjects: (u.subjects || []).join('; '), classes: (u.classes || []).join('; ')}); if (r.ok) u.profileDirty = false; }
+    // 3a) subjects a teacher added (queued while offline) – before the marks that use them
+    if (u.role !== 'student') for (const nm of db.pendingSubjects.slice()) {
+      const r = await postJSON(url, {action: 'add_subject', name: nm, base: db.subjects});
+      if (!r.ok && /unknown action/i.test(r.error || '')) break; // server not updated yet – keep it queued
+      db.pendingSubjects = db.pendingSubjects.filter(x => x !== nm);
+      if (r.ok) { if (r.name && r.name !== nm) renameSubjectLocal(nm, r.name); applySubjectLists(r.subjects_json, r.subject_meta_json); } else toast(r.error); save();
+    }
     // 3) marks, rosters, deletions, school settings
     if (u.role !== 'student') {
       const pend = db.tests.filter(t => !t.synced);
       const body = {action: 'push', rows: pend.flatMap(flatRows), test_ids: pend.map(t => t.id), deleted: db.deleted.slice(), deleted_notes: db.deletedNotes.slice()};
-      if (db.settings.rosterDirty) body.students = Object.entries(db.students).flatMap(([k, list]) => list.map(s => { const n = splitName(s); return {class: splitCk(k).grade, section: splitCk(k).section, roll_no: s.roll, first_name: n.first, last_name: n.last, father_name: s.father || '', student_name: n.full}; }));
+      if (db.settings.rosterDirty) body.students = Object.entries(db.students).flatMap(([k, list]) => list.filter(s => s.isNew || s.dirty).map(s => { const n = splitName(s); return {class: splitCk(k).grade, section: splitCk(k).section, roll_no: s.roll, first_name: n.first, last_name: n.last, father_name: s.father || '', student_name: n.full, new: s.isNew ? 'yes' : ''}; }));
       const delS = db.deletedStudents.slice(); if (delS.length) body.deleted_students = delS.map(k => { const [c, sc, r] = k.split('|'); return {class: c, section: sc, roll_no: r}; });
       if (db.settings.settingsDirty && u.role === 'owner') body.settings = {school_name: db.settings.schoolName, logo: db.settings.logo, honor_limit: db.settings.honorLimit,
-        classes_json: JSON.stringify(db.classes), subjects_json: JSON.stringify(db.subjects), teachers_can_announce: db.settings.teachersCanAnnounce, contact_json: JSON.stringify(db.settings.contact || {})};
+        classes_json: JSON.stringify(db.classes), subjects_json: JSON.stringify(db.subjects), teachers_can_announce: db.settings.teachersCanAnnounce, contact_json: JSON.stringify(db.settings.contact || {}),
+        pass_percent: db.settings.passPercent || 40, pass_overrides_json: JSON.stringify(db.settings.passOverrides || {}),
+        subjects_base: db.settings.lastPull || '', subject_renames: db.settings.subjectRenames || {}};
       const res = await postJSON(url, body);
       if (!res || res.ok === false) throw new Error(res && res.error || 'Script error');
+      if (res.forbidden && res.forbidden.length) toast(`⛔ Not allowed for ${res.forbidden.length} test(s) – not your class. Restored from the school copy.`);
       pend.forEach(t => t.synced = true); db.deleted = db.deleted.filter(id => !body.deleted.includes(id)); db.deletedNotes = db.deletedNotes.filter(id => !body.deleted_notes.includes(id));
-      if (body.settings) db.settings.settingsDirty = false; if (body.students) db.settings.rosterDirty = false; if (body.deleted_students) db.deletedStudents = db.deletedStudents.filter(x => !delS.includes(x)); save();
+      if (body.settings) { db.settings.settingsDirty = false; db.settings.subjectRenames = {}; } if (body.students) { db.settings.rosterDirty = false; Object.values(db.students).forEach(l => l.forEach(x => { delete x.isNew; delete x.dirty; })); if (res.forbidden_students) toast('Not your class – not saved: ' + res.forbidden_students.join(', ')); } if (body.deleted_students) db.deletedStudents = db.deletedStudents.filter(x => !delS.includes(x)); save();
       if (db.notes.some(n => !n.synced)) await (await loadMod('notes')).uploadPendingNotes(url);
     }
     if (db.announcements.some(a => !a.synced) || db.deletedAnn.length) await (await loadMod('ann')).uploadPendingAnn(url);
@@ -185,15 +200,18 @@ async function pullNow(manual) {
     mergeRemoteRows(res.rows || [], true);
     (res.users || []).forEach(su => { const ex = db.users.find(x => x.username === su.username); if (ex) { if (!ex.profileDirty) Object.assign(ex, userFromServer(su, ex)); } else db.users.push({id: 'r_' + su.username, remote: true, ...userFromServer(su, {})}); });
     if (res.users) { const names = new Set(res.users.map(x => x.username)); db.users = db.users.filter(x => !x.remote || names.has(x.username)); }
-    if (res.students && !db.settings.rosterDirty) res.students.forEach(s => { const key = `${s.class} ${s.section}`; const list = db.students[key] = db.students[key] || [];
-      const o = {name: s.student_name, first: s.first_name || '', last: s.last_name || '', father: s.father_name || ''};
-      const ex = list.find(x => x.roll === String(s.roll_no)); if (ex) { for (const k in o) if (o[k]) ex[k] = o[k]; } else list.push({roll: String(s.roll_no), ...o}); });
+    if (res.students) res.students.forEach(s => { const key = `${s.class} ${s.section}`; const list = db.students[key] = db.students[key] || [];
+      const o = {name: s.student_name, first: s.first_name || '', last: s.last_name || '', father: s.father_name || '', addedBy: s.added_by || ''};
+      const ex = list.find(x => x.roll === String(s.roll_no)); if (ex) { if (!ex.dirty && !ex.isNew) for (const k in o) if (o[k]) ex[k] = o[k]; } else list.push({roll: String(s.roll_no), ...o}); });
+    if (res.deleted_students) res.deleted_students.forEach(k => { const i = k.lastIndexOf('|'), c = k.slice(0, i), r = k.slice(i + 1); if (db.students[c]) db.students[c] = db.students[c].filter(x => x.roll !== r || x.isNew); });
     if (res.notes) { const remoteIds = new Set(res.notes.map(n => n.note_id));
       db.notes = db.notes.filter(n => !n.synced || remoteIds.has(n.id));
       res.notes.forEach(rn => { if (db.deletedNotes.includes(rn.note_id) || db.notes.some(n => n.id === rn.note_id)) return;
         db.notes.push({id: rn.note_id, cls: `${rn.class} ${rn.section}`, subject: rn.subject, title: rn.title, desc: rn.description, kind: rn.kind, text: rn.text,
           fileName: rn.file_name, mime: rn.mime, size: Number(rn.size) || 0, fileId: rn.file_id, url: rn.file_url, teacherName: rn.teacher, createdAt: rn.created_at, synced: true}); }); }
     if (res.announcements) mergeAnn(res.announcements);
+    if (res.my_stats) db.myStats = res.my_stats; if (Array.isArray(res.honor)) db.publicHonor = res.honor;
+    if (res.deleted_rows) db.deletedRows = res.deleted_rows; if (res.audit) db.audit = res.audit;
     db.settings.lastPull = new Date().toISOString(); save(); applyBranding();
     if (manual) { toast('Downloaded latest data ✓'); render(); }
   } catch (e) { console.warn('pull failed', e); if (manual) toast('Download failed: ' + e.message); }
@@ -201,7 +219,47 @@ async function pullNow(manual) {
 function userFromServer(s, ex) {
   const sp = v => String(v || '').split(';').map(x => x.trim()).filter(Boolean);
   return {username: s.username, name: s.name, role: s.role, status: s.status, phone: s.phone || '', subjects: sp(s.subjects), classes: sp(s.classes),
-    cls: s.class ? `${s.class} ${s.section}` : (ex.cls || ''), roll: s.roll_no || ex.roll || '', first: s.first_name || ex.first || '', last: s.last_name || ex.last || '', father: s.father_name || ex.father || '', email: s.email !== undefined ? s.email : (ex.email || '')};
+    cls: s.class ? `${s.class} ${s.section}` : (ex.cls || ''), roll: s.roll_no || ex.roll || '', first: s.first_name || ex.first || '', last: s.last_name || ex.last || '', father: s.father_name || ex.father || '', email: s.email !== undefined ? s.email : (ex.email || ''), createdAt: s.created_at || ex.createdAt || '', lastSeen: s.last_seen || ex.lastSeen || ''};
+}
+function applySubjectLists(sj, mj) { // server list + anything still queued on this phone
+  try { if (sj) { const list = JSON.parse(sj); if (Array.isArray(list) && list.length) db.subjects = list; } } catch (e) {}
+  try { if (mj) db.subjectMeta = JSON.parse(mj) || {}; } catch (e) {}
+  for (const n of db.pendingSubjects) if (!db.subjects.some(x => x.toLowerCase() === n.toLowerCase())) db.subjects.push(n);
+}
+function renameSubjectLocal(from, to) {
+  db.tests.forEach(t => { if (t.subject === from) { t.subject = to; t.synced = false; } });
+  db.users.forEach(u => { if (u.subjects) u.subjects = [...new Set(u.subjects.map(x => x === from ? to : x))]; });
+  if (db.subjectMeta[from]) { db.subjectMeta[to] = db.subjectMeta[from]; delete db.subjectMeta[from]; }
+  db.subjects = [...new Set(db.subjects.map(x => x === from ? to : x))];
+}
+/** An approved teacher (or the owner) adds a new subject: shared list, auto-assigned to them, usable at once, queued offline. */
+/** A teacher (or the owner) adds a student to a class roster: usable at once for marks, synced (queued offline). Roll is unique per class. */
+function addRosterStudent(f) {
+  const m = me(); if (!m || !approved(m)) throw new Error('Only approved teachers can add students');
+  const roll = String(f.roll || '').trim(), first = String(f.first || '').trim(), last = String(f.last || '').trim(), father = String(f.father || '').trim(), cls = f.cls;
+  if (!roll || !first || !last || !father || !cls) throw new Error('Roll, first name, last name, father\'s name and class are required');
+  if (!/^[A-Za-z0-9-]{1,10}$/.test(roll)) throw new Error('Roll number: letters/numbers only');
+  if (!myClasses().includes(cls)) throw new Error('You can only add students to your own classes');
+  const list = db.students[cls] = db.students[cls] || [];
+  if (list.some(x => x.roll === roll) || db.users.some(u => u.role === 'student' && u.cls === cls && u.roll === roll && u.status !== 'rejected'))
+    throw new Error(`Roll ${roll} already exists in ${cls}`);
+  list.push({roll, first, last, father, name: `${first} ${last}`, addedBy: m.role === 'owner' ? 'admin' : m.name, isNew: true});
+  db.settings.rosterDirty = true; save(); syncNow(false).catch(() => {});
+  return {roll, cls};
+}
+function addSubject(raw) {
+  const m = me(); if (!m || !approved(m)) throw new Error('Only approved teachers can add subjects');
+  const name = String(raw || '').replace(/\s+/g, ' ').trim();
+  if (!name || name.length > 40) throw new Error('Subject name: 1–40 characters');
+  if (/[;|<>]/.test(name)) throw new Error('Subject name cannot contain ; | < >');
+  const dup = allSubjects().find(x => x.toLowerCase() === name.toLowerCase());
+  const final = dup || name;
+  if (!dup) { db.subjects.push(name); db.subjectMeta[name] = {by: m.name, username: m.username, at: new Date().toISOString()};
+    if (m.role === 'owner') db.settings.settingsDirty = true; else db.pendingSubjects.push(name); }
+  else if (!db.subjects.includes(dup)) db.subjects.push(dup);
+  if (m.role !== 'owner' && m.subjects && m.subjects.length && !m.subjects.includes(final)) m.subjects.push(final);
+  save(); if (!dup) syncNow(false).catch(() => {});
+  return {name: final, existed: !!dup};
 }
 function applyServerSettings(s) {
   if (db.settings.settingsDirty) return;
@@ -209,7 +267,10 @@ function applyServerSettings(s) {
   if (s.logo !== undefined) db.settings.logo = s.logo || '';
   if (Number(s.honor_limit) > 0) db.settings.honorLimit = Number(s.honor_limit);
   if (s.teachers_can_announce) db.settings.teachersCanAnnounce = s.teachers_can_announce;
-  try { if (s.classes_json) db.classes = JSON.parse(s.classes_json); if (s.subjects_json) db.subjects = JSON.parse(s.subjects_json); } catch (e) {}
+  if (Number(s.pass_percent) > 0) db.settings.passPercent = Number(s.pass_percent);
+  try { if (s.pass_overrides_json) db.settings.passOverrides = JSON.parse(s.pass_overrides_json) || {}; } catch (e) {}
+  try { if (s.classes_json) db.classes = JSON.parse(s.classes_json); } catch (e) {}
+  applySubjectLists(s.subjects_json, s.subject_meta_json);
   if (s.report_key) db.settings.reportKey = s.report_key;
   try { if (s.contact_json) db.settings.contact = {...DEFAULT_CONTACT, ...JSON.parse(s.contact_json)}; } catch (e) {}
 }
@@ -230,7 +291,7 @@ function mergeRemoteRows(rows, authoritative) {
     const local = db.tests.find(t => t.id === id); if (local && !local.synced) continue; // local edits win until pushed
     const g = groups[id], f = g[0];
     const t = {id, date: normDate(f.date), grade: String(f.class), section: String(f.section), subject: String(f.subject), total: Number(f.total),
-      teacherName: String(f.teacher), teacherId: '', synced: true, updatedAt: '',
+      teacherName: String(f.teacher), teacherId: '', synced: true, updatedAt: String(f.updated_at || ''), updatedBy: String(f.updated_by || ''),
       rows: g.map(r => ({roll: String(r.roll_no), name: String(r.student_name), obt: isLeave(r) ? null : Number(r.obtained)}))};
     t.rows.forEach(x => x.status = x.obt == null ? 'leave' : 'present');
     if (local) Object.assign(local, t, {teacherId: local.teacherId}); else db.tests.push(t);
@@ -242,7 +303,7 @@ function normDate(v) { const s = String(v); if (/^\d{4}-\d{2}-\d{2}/.test(s)) re
 function rememberRoster(key, rows, fromServer) {
   const roster = db.students[key] || [];
   rows.forEach(r => { if (!r.roll && !r.name) return; const ex = roster.find(s => s.roll === r.roll);
-    if (ex) { if (r.father) ex.father = r.father; if (r.first) { ex.first = r.first; ex.last = r.last || ''; ex.name = fullName(r); } else if (r.name && r.name !== ex.name && !(ex.first && fullName(ex) === r.name)) { ex.name = r.name; const n = splitName({name: r.name}); ex.first = n.first; ex.last = n.last; } } else { const n = splitName(r); roster.push({roll: r.roll, name: n.full, first: n.first, last: n.last, father: r.father || ''}); if (!fromServer) db.settings.rosterDirty = true; } });
+    if (ex) { const before = JSON.stringify([ex.father, ex.first, ex.last, ex.name]); if (r.father) ex.father = r.father; if (r.first) { ex.first = r.first; ex.last = r.last || ''; ex.name = fullName(r); } else if (r.name && r.name !== ex.name && !(ex.first && fullName(ex) === r.name)) { ex.name = r.name; const n = splitName({name: r.name}); ex.first = n.first; ex.last = n.last; } if (!fromServer && JSON.stringify([ex.father, ex.first, ex.last, ex.name]) !== before) { ex.dirty = true; db.settings.rosterDirty = true; } } else { const n = splitName(r); roster.push({roll: r.roll, name: n.full, first: n.first, last: n.last, father: r.father || '', ...(fromServer ? {} : {dirty: true})}); if (!fromServer) db.settings.rosterDirty = true; } });
   roster.sort((a, b) => (parseFloat(a.roll) || 0) - (parseFloat(b.roll) || 0) || String(a.roll).localeCompare(String(b.roll)));
   db.students[key] = roster;
 }
@@ -382,7 +443,39 @@ async function changePassword(oldPw, newPw) {
     const r = await postJSON(db.settings.scriptUrl, {action: 'change_password', old_hash: hashPw(oldPw, u.salt), salt, hash}); if (!r.ok) throw new Error(r.error); }
   Object.assign(u, {salt, hash, mustChange: false}); save();
 }
-function logout() { if (online() && getToken()) postJSON(db.settings.scriptUrl, {action: 'logout'}).catch(() => {}); localStorage.removeItem(SES_KEY); localStorage.removeItem(TOKEN_KEY); STATE.authMode = 'login'; go('home'); }
+function doLogout(all) { const tok = getToken();
+  if (online() && tok) postJSON(db.settings.scriptUrl, {action: all ? 'logout_all' : 'logout'}).catch(() => {});
+  localStorage.removeItem(SES_KEY); localStorage.removeItem(TOKEN_KEY); STATE.lastLogin = ''; closeUserMenu(); toast(all ? 'Logged out from all devices ✓' : 'Logged out ✓'); go('home'); }
+/** Log out: unsynced items stay saved on this phone (they sync after the next login) – warn and offer "Sync now" first. */
+function logout(all) {
+  all = all === true; closeUserMenu(); const n = pendingCount();
+  if (!n) { if (all && !confirm('Log out from ALL devices (phones and computers) where you are signed in?')) return; return doLogout(all); }
+  const m = $('#modal'); m.innerHTML = `<div class="modal-card" role="dialog" aria-modal="true" id="logoutDlg"><h2>⚠️ ${n} item${n > 1 ? 's' : ''} not synced yet</h2>
+    <p>Marks, notes or changes on this phone have not reached the school Sheet yet. They will <b>not be lost</b> – they stay saved on this phone and sync after you log in again here – but syncing now is safest.</p>
+    <div class="modal-acts"><button class="btn" id="lgSync">⟳ Sync now, then log out</button><button class="btn sec" id="lgAnyway">Log out anyway (keep on this phone)</button><button class="btn sec" id="lgCancel">Cancel</button></div></div>`;
+  m.classList.remove('hidden');
+  $('#lgCancel').onclick = () => m.classList.add('hidden');
+  $('#lgAnyway').onclick = () => { m.classList.add('hidden'); doLogout(all); };
+  $('#lgSync').onclick = async e => { if (!online()) return toast('You are offline – connect to the internet to sync'); e.target.disabled = true; e.target.textContent = 'Syncing…';
+    await syncNow(true); const left = pendingCount(); m.classList.add('hidden'); if (left) { toast(`${left} item(s) still not synced`); logout(all); } else doLogout(all); };
+}
+const whoText = u => u.role === 'student' ? `${u.name || u.username}, Class ${String(u.cls || '').replace(/\s+/, '-')}, Roll ${u.roll || ''}` : `${u.name || u.username}, ${u.role === 'owner' ? 'Admin' : 'Teacher'}`;
+function closeUserMenu() { const d = $('#userMenu'); if (d) d.classList.add('hidden'); const b = $('#userBtn'); if (b) b.setAttribute('aria-expanded', 'false'); }
+function renderUserMenu() {
+  const u = sessionUser(), ok = approved(u), w = $('#umenuWrap'); if (!w) return;
+  w.classList.toggle('hidden', !u); const ho = $('#hdrLogout'); if (ho) ho.classList.toggle('hidden', !u); if (!u) return; { const t = whoText(u), i = t.indexOf(', '); $('#whoami').innerHTML = i < 0 ? esc(t) : `<span class="wn">${esc(t.slice(0, i))}</span><span class="wsep">, </span><span class="wd">${esc(t.slice(i + 2))}</span>`; }
+  const role = u.role === 'owner' ? 'Admin' : u.role === 'student' ? 'Student' : 'Teacher';
+  $('#uAv').textContent = (u.name || u.username || '?').trim().split(/\s+/).map(x => x[0]).slice(0, 2).join('').toUpperCase();
+  $('#uRole').textContent = role; $('#uRole').className = 'rbadge r-' + u.role;
+  $('#userMenu').innerHTML = `<div class="um-h"><b>${esc(u.name || u.username)}</b><span class="rbadge r-${esc(u.role)}">${role}</span><small>@${esc(u.username)}${u.role === 'student' ? ` · ${esc(u.cls)} #${esc(u.roll)}` : ''}</small></div>
+    ${ok ? `<button data-um="profile">👤 Profile</button><button data-um="password">🔑 Change password</button>` : ''}
+    <button data-um="sync">⟳ Sync now <small>${pendingCount() ? pendingCount() + ' waiting' : 'all synced'}</small></button>
+    <button data-um="logout" id="umLogout" class="um-out">🚪 Logout</button><button data-um="logoutall" id="umLogoutAll">📵 Logout from all devices</button>`;
+  $$('#userMenu [data-um]').forEach(b => b.onclick = () => { const a = b.dataset.um; closeUserMenu();
+    if (a === 'profile') go(u.role === 'student' ? 'account' : 'settings');
+    else if (a === 'password') { STATE.focusPw = true; go(u.role === 'student' ? 'account' : 'settings'); }
+    else if (a === 'sync') syncNow(true); else if (a === 'logout') logout(); else logout(true); });
+}
 
 /* ------------------------------------------------------------------ announcements (core part: visibility, bell, banner) */
 function annVisible(a, u) {
@@ -410,21 +503,27 @@ function classAvg(tests) { let o = 0, t = 0; tests.forEach(x => x.rows.forEach(r
 
 /* ------------------------------------------------------------------ router */
 let VIEW = 'home'; const STATE = {};
-function go(v, extra) { VIEW = v; if (extra) Object.assign(STATE, extra); location.hash = v; render(); window.scrollTo(0, 0); }
-const STUDENT_VIEWS = ['notes', 'mine', 'card', 'honor', 'chat', 'ann', 'account'];
+const hashView = () => decodeURIComponent(location.hash.replace(/^#\/?/, '')).replace(/\/$/, '');
+function go(v, extra) { VIEW = v; if (extra) Object.assign(STATE, extra); if (hashView() !== v) history.replaceState(null, '', '#/' + v); render(); window.scrollTo(0, 0); }
+const STUDENT_VIEWS = ['shome', 'notes', 'mine', 'card', 'honor', 'chat', 'ann', 'account'];
+const PUBLIC_VIEWS = ['home', 'teacher', 'teacher/register', 'student', 'student/register', 'admin', 'pending'];
 function render() {
   if (dashMod) dashMod.destroyCharts(); if (chatMod) chatMod.stopChat(); updateStatus(); applyBranding();
   const u = sessionUser(), ok = approved(u), stu = u && u.role === 'student';
-  renderFooter(); $('#nav').classList.toggle('hidden', !u || !ok); $('#menuBtn').classList.toggle('hidden', !u || !ok); $('#navAdmin').classList.toggle('hidden', !isOwner());
-  $$('#nav [data-who]').forEach(b => b.classList.toggle('hidden', b.dataset.who !== (stu ? 'student' : 'teacher')));
+  renderFooter(); renderUserMenu(); $('#nav').classList.toggle('hidden', !u || !ok); $('#menuBtn').classList.toggle('hidden', !u || !ok); $('#pubNav').classList.toggle('hidden', !!(u && ok));
+  const roleKey = !u ? '' : stu ? 'student' : u.role === 'owner' ? 'owner' : 'teacher'; document.body.dataset.role = roleKey || 'public';
+  $$('#nav [data-who]').forEach(b => b.classList.toggle('hidden', !b.dataset.who.split(' ').includes(roleKey)));
+  $$('#pubNav [data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === VIEW.split('/')[0]));
   updateNotesBadge(); $('#annBanner').innerHTML = '';
   if (VIEW === 'forgot' && u) VIEW = 'home';
   if (['lookup', 'contact', 'forgot'].includes(VIEW)) { $$('#nav button').forEach(b => b.classList.toggle('active', b.dataset.view === VIEW)); // public pages
     if (VIEW === 'lookup') return lazyView('dash', 'viewLookup'); if (VIEW === 'contact') return viewContact(); return viewForgot(); }
-  if (!u) return hasOwner() ? viewLogin() : viewOwnerSetup();
+  if (!u) { if (!PUBLIC_VIEWS.includes(VIEW) || VIEW === 'pending') VIEW = 'home';
+    if (VIEW === 'home') return viewPublicHome(); const [r, sub] = VIEW.split('/'); return viewRoleLogin(r, sub === 'register'); }
   if (!ok) return viewPending(u);
+  if (PUBLIC_VIEWS.includes(VIEW) && !(VIEW === 'admin' && isOwner()) && !(VIEW === 'home' && !stu)) VIEW = landingFor(u);
   if (u.mustChange) VIEW = u.role === 'student' ? 'account' : 'settings';
-  if (stu && !STUDENT_VIEWS.includes(VIEW)) VIEW = 'notes';
+  if (stu && !STUDENT_VIEWS.includes(VIEW)) VIEW = 'shome';
   if (!stu && (VIEW === 'mine' || VIEW === 'account')) VIEW = VIEW === 'account' ? 'settings' : 'home';
   if (VIEW === 'admin' && !isOwner()) VIEW = 'home';
   $$('#nav button').forEach(b => b.classList.toggle('active', b.dataset.view === VIEW));
@@ -436,7 +535,7 @@ function render() {
   if (VIEW === 'notes') return lazyView('notes', 'viewNotes');
   if (VIEW === 'chat') return lazyView('chat', 'viewChat');
   if (VIEW === 'ann') return lazyView('ann', 'viewAnn');
-  const lazy = {report: 'viewReport', card: 'viewCard', sdash: 'viewStudentDash', mine: 'viewStudentDash', tdash: 'viewTeacherDash', admin: 'viewAdmin', honor: 'viewHonor'}[VIEW];
+  const lazy = {shome: 'viewStudentHome', report: 'viewReport', card: 'viewCard', sdash: 'viewStudentDash', mine: 'viewStudentDash', tdash: 'viewTeacherDash', mystudents: 'viewMyStudents', admin: 'viewAdmin', honor: 'viewHonor'}[VIEW];
   if (!lazy) { VIEW = 'home'; return viewHome(); }
   lazyView('dash', lazy);
 }
@@ -455,18 +554,9 @@ function updateNotesBadge() {
   const seen = db.settings.notesSeen[u.id] || ''; const n = notesFor(u).filter(x => (x.createdAt || '') > seen && x.teacherName !== u.name).length;
   b.textContent = n ? n : ''; b.classList.toggle('hidden', !n);
 }
-function viewPending(u) {
-  const who = u.role === 'student' ? `student of <b>${esc(u.cls)}</b>, roll # <b>${esc(u.roll)}</b>` : '<b>teacher</b>';
-  app().innerHTML = `<div class="login-wrap"><div class="card" style="text-align:center"><h2>${u.status === 'rejected' ? '⛔ Account not approved' : '⏳ Waiting for approval'}</h2>
-    <p>Assalam-o-Alaikum <b>${esc(u.name || u.username)}</b>! Your account as ${who} is <b>${esc(u.status || 'pending')}</b>.</p>
-    <p class="muted">Only the school owner can approve accounts. <span class="ur">صرف مالک منظوری دے سکتے ہیں</span></p>
-    <button class="btn sec" id="pChk">⟳ Check again</button><button class="btn red" id="stOut">Log out</button></div></div>`;
-  $('#stOut').onclick = logout;
-  $('#pChk').onclick = async () => { if (!online()) return toast('Connect to the internet to check'); const r = await tryServerLogin(u.username, u.hash); if (r.ok) { toast('Approved ✓'); await pullNow(false); } else toast(r.error || 'Still ' + (r.status || 'pending')); render(); };
-}
 $$('#nav button').forEach(b => b.onclick = () => { document.body.classList.remove('nav-open'); go(b.dataset.view); });
 $('#menuBtn').onclick = () => document.body.classList.toggle('nav-open');
-window.addEventListener('hashchange', () => { const v = location.hash.slice(1); if (v && v !== VIEW) { VIEW = v; render(); } });
+window.addEventListener('hashchange', () => { const v = hashView() || 'home'; if (v !== VIEW) { VIEW = v; render(); window.scrollTo(0, 0); } });
 const app = () => $('#app');
 const opts = (arr, sel, all) => (all ? `<option value="">${all}</option>` : '') + arr.map(v => `<option ${v === sel ? 'selected' : ''} value="${esc(v)}">${esc(v)}</option>`).join('');
 
@@ -486,7 +576,7 @@ function viewOwnerSetup() {
     ${secQHTML('O')}
     <button class="btn" id="oSave" style="width:100%">Create owner account</button>
     <p class="muted">Keep these details safe – write them on paper. ${db.settings.scriptUrl ? 'This will be saved to the school Google Sheet.' : ''}</p>
-    <button class="btn sec sm" onclick="go('lookup')">👪 Parent result lookup</button><button class="btn sec sm" id="oHave">Owner already exists? Log in</button></div></div>`;
+    <a class="auth-home" href="#/home">← Home</a> <button class="btn sec sm" onclick="go('lookup')">👪 Parent result lookup</button><button class="btn sec sm" id="oHave">Owner already exists? Log in</button></div></div>`;
   $('#oHave').onclick = () => { db.settings.serverHasOwner = true; save(); render(); };
   $('#oSave').onclick = async () => {
     const name = $('#oName').value.trim(), user = $('#oUser').value.trim(), p = $('#oPass').value;
@@ -504,12 +594,53 @@ function publicAnnHTML() {
 }
 const secQHTML = (id = 'Q') => `<div class="row"><div><label>Security question <span class="ur">حفاظتی سوال</span></label><select id="sec${id}">${opts(SEC_QS)}</select></div>
   <div><label>Answer <span class="ur">جواب</span></label><input id="secA${id}" autocomplete="off" placeholder="used if you forget your password"></div></div>`;
-function viewLogin() {
-  const mode = STATE.authMode || 'login';
+/* ------------------------------------------------------------------ public home + three login pages (#/teacher, #/student, #/admin) */
+const ROLE_PAGES = {
+  teacher: {icon: '👩‍🏫', title: 'Teacher Login', ur: 'اساتذہ لاگ ان', text: 'Enter marks, see class reports, share notes and chat with your classes.',
+    bullets: ['➕ Enter daily test marks', '🏫 My classes & insights', '🗓️ Weekly / monthly reports', '📚 Notes, 💬 chat, 📢 announcements']},
+  student: {icon: '🎓', title: 'Student Login', ur: 'طلبہ لاگ ان', text: 'See your marks, progress dashboard, notes and class chat.',
+    bullets: ['📈 My results & progress', '🏠 Personal dashboard', '📚 Class notes & 💬 chat', '👤 Profile & settings']},
+  admin: {icon: '🛡️', title: 'Admin Login', ur: 'ایڈمن لاگ ان', text: 'Approve accounts, manage classes, subjects and school settings.',
+    bullets: ['✅ Approve teachers & students', '🏫 Classes, sections & subjects', '📊 Whole-school dashboards', '⚙️ School name, logo & backup']},
+};
+const landingFor = u => u.mustChange ? (u.role === 'student' ? 'account' : 'settings') : u.role === 'student' ? 'shome' : u.role === 'owner' ? 'admin' : 'home';
+function honorMiniHTML(list) {
+  if (!list || !list.length) return '<div class="empty">🏅 The Honor Board fills up as soon as teachers enter test marks.</div>';
+  const medal = ['🥇', '🥈', '🥉'];
+  return `<ol class="hb-mini">${list.slice(0, Math.max(1, Math.min(20, Number(db.settings.honorLimit) || 7))).map((h, i) => `<li><span class="hb-r">${i < 3 ? medal[i] : i + 1}</span>
+    <span class="hb-n"><b>${esc(h.name)}</b><small>${esc(h.cls)} · ${esc(h.subject)}</small></span><span class="hb-p">${p1(h.pct)}</span></li>`).join('')}</ol>`;
+}
+function tilesHTML(list, id) { return `<div class="tiles" id="${id}">${list.map(([v, ic, t, x]) => `<button class="tile" data-tile="${v}" onclick="go('${v}')"><span class="tile-ic">${ic}</span><b>${t}</b><small>${x}</small></button>`).join('')}</div>`; }
+function viewPublicHome() {
+  const name = db.settings.schoolName || DEFAULT_NAME, logo = db.settings.logo || 'icons/icon-192.png';
+  const card = r => { const c = ROLE_PAGES[r]; return `<a class="entry entry-${r}" href="#/${r}" data-entry="${r}"><span class="entry-ic">${c.icon}</span>
+    <span class="entry-t">${c.title}</span><span class="ur">${c.ur}</span><span class="entry-x">${c.text}</span><span class="entry-go">${r === 'admin' ? 'Login' : 'Login / Register'} →</span></a>`; };
+  const anns = annFor(null).slice(0, 4);
+  app().innerHTML = `<section class="hero" id="homeHero"><img src="${esc(logo)}" class="hero-logo" alt="">
+      <h1>${esc(name)}</h1><p class="hero-tag">Every test, every student – recorded, analysed and shared.</p>
+      <p class="hero-ur ur">ہر ٹیسٹ، ہر طالب علم – محفوظ ریکارڈ</p>
+      <div class="hero-cta"><button class="btn light" onclick="go('lookup')">👪 Check Result</button><button class="btn light" onclick="go('contact')">📞 Contact</button></div></section>
+    <section class="entry-grid" id="entryCards">${card('teacher')}${card('student')}${card('admin')}</section>
+    <section class="home-grid">
+      <div class="card" id="homeHonor"><div class="card-h"><h2>🏅 Honor Board <span class="ur">اعزازی بورڈ</span></h2><span class="muted">Top ${Number(db.settings.honorLimit) || 7} · last 30 days</span></div><div id="hbBody">${honorMiniHTML(db.publicHonor)}</div></div>
+      <div class="home-side">
+        <div class="card" id="homeAnn"><h2>📢 Announcements <span class="ur">اعلانات</span></h2>${anns.length ? anns.map(a => `<div class="ann ${a.pinned ? 'pin' : ''}"><b>${a.pinned ? '📌 ' : ''}${esc(a.title)}</b>
+          <div class="muted">${fmtD(a.createdAt.slice(0, 10))}${a.expires ? ' · until ' + fmtD(a.expires) : ''}</div><div style="white-space:pre-wrap">${esc(a.message)}</div>
+          ${a.fileId && /^image\//.test(a.mime) ? `<img class="annimg" data-annimg="${esc(a.id)}" alt="">` : a.fileId ? `<button class="btn sm sec" data-annfile="${esc(a.id)}">📎 ${esc(a.fileName)}</button>` : ''}</div>`).join('') : '<div class="muted">No announcements right now.</div>'}</div>
+        <div class="card home-check"><h2>👪 Parents: Check Result</h2><p class="muted">Choose the class and enter the roll number – no login needed.</p><button class="btn" style="width:100%" onclick="go('lookup')">Check Result →</button></div>
+        <div class="card"><h2>💬 Contact the school</h2>${contactHTML(true)}</div>
+      </div></section>`;
+  bindAnnFiles();
+  if (!(db.publicHonor || []).length && db.tests.length) loadMod('dash').then(m => { const el = $('#hbBody'); if (el && VIEW === 'home') el.innerHTML = honorMiniHTML(m.honorList({from: addDays(today(), -30), to: today(), limit: 20})); }).catch(() => {});
+}
+function viewRoleLogin(role, register) {
+  const c = ROLE_PAGES[role]; STATE.lastLogin = role;
+  if (role === 'admin' && !hasOwner()) return viewOwnerSetup();
   const cls = db.classes.map(ck);
-  app().innerHTML = `<div class="login-wrap"><div class="card">${brandHead(mode === 'login' ? 'Login · <span class="ur">لاگ ان</span>' : 'Sign-up · <span class="ur">رجسٹریشن</span>')}
-    <div class="tabs"><button class="btn ${mode === 'login' ? '' : 'sec'}" id="tLogin">Login</button><button class="btn ${mode === 'student' ? '' : 'sec'}" id="tStu">Student sign-up</button><button class="btn ${mode === 'register' ? '' : 'sec'}" id="tReg">Teacher sign-up</button></div>
-    ${mode === 'student' ? `
+  const side = `<div class="auth-side"><div class="auth-ic">${c.icon}</div><h1>${register ? (role === 'teacher' ? 'Teacher Registration' : 'Student Registration') : c.title}</h1><div class="ur">${c.ur}</div>
+    <p>${esc(c.text)}</p><ul>${c.bullets.map(b => `<li>${b}</li>`).join('')}</ul><a class="auth-home" href="#/home">← ${esc(db.settings.schoolName || DEFAULT_NAME)} home</a></div>`;
+  let form;
+  if (register && role === 'student') form = `<h2>Create student account</h2><p class="muted">All fields with * are required. The admin approves your account.</p>
       <label>Roll Number <span class="ur">رول نمبر</span> *</label><input id="suRoll" inputmode="numeric" required>
       <div class="row"><div><label>First Name <span class="ur">پہلا نام</span> *</label><input id="suFirst" autocomplete="given-name" required></div><div><label>Last Name <span class="ur">آخری نام</span> *</label><input id="suLast" autocomplete="family-name" required></div></div>
       <label>Father's Name <span class="ur">والد کا نام</span> *</label><input id="suFather" required>
@@ -518,48 +649,66 @@ function viewLogin() {
       <label>Password (6+) <span class="ur">پاس ورڈ</span> *</label><input id="suPass" type="password" autocomplete="new-password">
       ${secQHTML('S')}
       <label>Recovery email (optional) <span class="ur">ای میل</span></label><input id="suEmail" type="email" inputmode="email" autocapitalize="none" placeholder="for a password reset code">
-      <p class="muted">The school owner approves your account. Then log in on any phone with your <b>roll number or username</b> + password.</p>
-      <button class="btn" id="doStu" style="width:100%">Request access</button>` :
-    mode === 'register' ? `
-      <label>Full name <span class="ur">پورا نام</span></label><input id="rName" autocomplete="name">
-      <label>Username <span class="ur">یوزر نیم</span></label><input id="rUser" autocomplete="username" autocapitalize="none" placeholder="e.g. ahmad or 03001234567">
+      <button class="btn big" id="doStu">Register as student</button>
+      <p class="auth-switch">Already registered? <a href="#/student" id="toLogin">Log in here</a></p>`;
+  else if (register) form = `<h2>Create teacher account</h2><p class="muted">The admin approves new teachers. <span class="ur">مالک منظوری دیں گے</span></p>
+      <label>Full name <span class="ur">پورا نام</span> *</label><input id="rName" autocomplete="name">
+      <label>Username <span class="ur">یوزر نیم</span> *</label><input id="rUser" autocomplete="username" autocapitalize="none" placeholder="e.g. ahmad or 03001234567">
       <label>Phone (optional) <span class="ur">فون نمبر</span></label><input id="rPhone" inputmode="tel">
-      <label>Password (6+) <span class="ur">پاس ورڈ</span></label><input id="rPass" type="password" autocomplete="new-password">
+      <label>Password (6+) <span class="ur">پاس ورڈ</span> *</label><input id="rPass" type="password" autocomplete="new-password">
       ${secQHTML('T')}
       <label>Recovery email (optional) <span class="ur">ای میل</span></label><input id="rEmail" type="email" inputmode="email" autocapitalize="none" placeholder="for a password reset code">
-      <p class="muted">The school owner approves new teachers. <span class="ur">مالک منظوری دیں گے</span></p>
-      <button class="btn" id="doReg" style="width:100%">Create account</button>` : `
-      <label>Username or Roll Number <span class="ur">یوزر نیم یا رول نمبر</span></label><input id="lUser" autocomplete="username" autocapitalize="none">
-      <div id="lClsBox" class="${STATE.needCls ? '' : 'hidden'}"><label>Your class (roll number is used in more than one class)</label><select id="lCls">${opts(cls, '', '— choose class —')}</select></div>
+      <button class="btn big" id="doReg">Register as teacher</button>
+      <p class="auth-switch">Already registered? <a href="#/teacher" id="toLogin">Log in here</a></p>`;
+  else form = `<h2>${c.title}</h2>
+      <label>${role === 'student' ? 'Roll Number or Username <span class="ur">رول نمبر یا یوزر نیم</span>' : role === 'admin' ? 'Admin username <span class="ur">یوزر نیم</span>' : 'Username <span class="ur">یوزر نیم</span>'}</label>
+      <input id="lUser" autocomplete="username" autocapitalize="none" ${role === 'student' ? 'placeholder="e.g. 12 or hamza"' : ''}>
+      <div id="lClsBox" class="${STATE.needCls ? '' : 'hidden'}"><label>Your class (this roll number is used in more than one class)</label><select id="lCls">${opts(cls, '', '— choose class —')}</select></div>
       <label>Password <span class="ur">پاس ورڈ</span></label><input id="lPass" type="password" autocomplete="current-password">
-      <button class="btn" id="doLogin" style="width:100%">Login</button>
-      <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;margin-top:8px"><button class="btn sec sm" onclick="go('forgot')">Forgot password? <span class="ur">پاس ورڈ بھول گئے</span></button><button class="btn sec sm" onclick="go('contact')">📞 Contact</button></div>`}
-    <p class="muted" style="margin-top:12px">🔒 Works on any phone. Passwords are salted &amp; hashed – the plain password is never stored or sent.</p>
-    <button class="btn sec" style="width:100%" onclick="go('lookup')">👪 Parents: Check Result <span class="ur">والدین کے لیے نتیجہ</span></button>
-  </div>${publicAnnHTML()}</div>`;
-  bindAnnFiles();
-  $('#tLogin').onclick = () => { STATE.authMode = 'login'; render(); };
-  $('#tReg').onclick = () => { STATE.authMode = 'register'; render(); };
-  $('#tStu').onclick = () => { STATE.authMode = 'student'; render(); };
+      <button class="btn big" id="doLogin">Log in</button>
+      <div class="auth-links"><a href="#/forgot" id="fpLink">Forgot password? <span class="ur">پاس ورڈ بھول گئے</span></a></div>
+      ${role === 'admin' ? '<p class="auth-switch muted">Admin accounts cannot be registered here. Teachers and students: use your own login page.</p>'
+        : `<p class="auth-switch">New ${role}? <a href="#/${role}/register" id="toRegister">Register here →</a></p>`}`;
+  app().innerHTML = `<div class="auth-wrap auth-${role}">${side}<div class="card auth-card">${form}
+    <p class="muted auth-foot">🔒 Passwords are salted &amp; hashed – never stored or sent in plain text.</p></div></div>`;
   const busy = async (btn, fn) => { btn.disabled = true; try { await fn(); } catch (e) { toast(e.message.replace(/^choose_class:\s*/, '')); } finally { btn.disabled = false; } };
-  if (mode === 'student') $('#doStu').onclick = e => busy(e.target, async () => {
+  if (register && role === 'student') $('#doStu').onclick = e => busy(e.target, async () => {
     const f = {role: 'student', roll: $('#suRoll').value.trim(), first: $('#suFirst').value.trim(), last: $('#suLast').value.trim(), father: $('#suFather').value.trim(), cls: $('#suCls').value,
       username: $('#suUser').value, pass: $('#suPass').value, secQ: $('#secS').value, secA: $('#secAS').value, email: $('#suEmail').value};
-    if (!f.roll || !f.first || !f.last || !f.father || !f.cls || !f.username.trim()) throw new Error('All fields are required');
+    if (!f.roll || !f.first || !f.last || !f.father || !f.cls || !f.username.trim()) throw new Error('All fields with * are required');
     if (f.pass.length < 6) throw new Error('Password: at least 6 characters');
-    await signUp(f); STATE.authMode = null; go('notes');
+    await signUp(f); go('pending');
   });
-  else if (mode === 'register') $('#doReg').onclick = e => busy(e.target, async () => {
+  else if (register) $('#doReg').onclick = e => busy(e.target, async () => {
     const f = {role: 'teacher', name: $('#rName').value.trim(), username: $('#rUser').value, pass: $('#rPass').value, phone: $('#rPhone').value.trim(), secQ: $('#secT').value, secA: $('#secAT').value, email: $('#rEmail').value};
     if (!f.name || !f.username.trim() || f.pass.length < 6) throw new Error('Enter name, username and a password (6+ chars)');
-    await signUp(f); STATE.authMode = null; go('home');
+    await signUp(f); go('pending');
   });
   else $('#doLogin').onclick = e => busy(e.target, async () => {
-    try { const u = await login($('#lUser').value, $('#lPass').value, $('#lCls').value); STATE.authMode = null; STATE.needCls = false;
+    try { const u = await login($('#lUser').value, $('#lPass').value, $('#lCls').value); STATE.needCls = false;
       if (getToken()) await pullNow(false);
-      go(u.mustChange ? 'account' : u.role === 'student' ? 'notes' : u.role === 'owner' ? 'admin' : 'home');
+      const want = role === 'admin' ? 'owner' : role; if (approved(u) && u.role !== want) toast(`Logged in as ${u.role === 'owner' ? 'admin' : u.role} – opening your dashboard`);
+      go(approved(u) ? landingFor(u) : 'pending');
     } catch (err) { if (/^choose_class/.test(err.message)) { STATE.needCls = true; $('#lClsBox').classList.remove('hidden'); } throw err; }
   });
+}
+function viewPending(u) {
+  const rej = u.status === 'rejected', c = contactInfo();
+  const who = u.role === 'student' ? `student of <b>${esc(u.cls)}</b>, roll # <b>${esc(u.roll)}</b>` : '<b>teacher</b>';
+  const msg = `Assalam-o-Alaikum, I registered on ${db.settings.schoolName || DEFAULT_NAME} as ${u.role === 'student' ? `a student (${u.cls}, roll ${u.roll})` : 'a teacher'}. Username: ${u.username}. Please approve my account.`;
+  app().innerHTML = `<div class="pending-wrap"><div class="card pending" id="pendingCard">
+    <div class="pending-ic">${rej ? '⛔' : '⏳'}</div>
+    <h1>${rej ? 'Account not approved' : 'Registration received – waiting for approval'}</h1><div class="ur">${rej ? 'اکاؤنٹ منظور نہیں ہوا' : 'رجسٹریشن ہو گئی – منظوری کا انتظار'}</div>
+    <p>Assalam-o-Alaikum <b>${esc(u.name || u.username)}</b>! Your account as ${who} (username <code>${esc(u.username)}</code>) is <b>${esc(u.status || 'pending')}</b>.</p>
+    ${rej ? '<p>Please contact the school admin.</p>' : `<ol class="steps"><li class="done"><b>1. Registered</b><span>Your details were sent to the school.</span></li>
+      <li class="now"><b>2. Admin approves</b><span>Only the school admin can approve new ${u.role === 'student' ? 'students' : 'teachers'}. This usually happens the same day.</span></li>
+      <li><b>3. Log in &amp; start</b><span>After approval, log in on <b>any phone</b> from the ${u.role === 'student' ? 'Student' : 'Teacher'} Login page.</span></li></ol>`}
+    <p class="muted">Want it faster? Send the admin a WhatsApp message:</p>
+    ${c.whatsapp ? `<a class="btn wa big" id="pendWa" href="${esc(waLink(c.whatsapp))}?text=${encodeURIComponent(msg)}" target="_blank" rel="noopener">💬 WhatsApp ${esc(c.whatsapp_name || 'admin')} · ${esc(c.whatsapp)}</a>` : contactHTML(true)}
+    <div class="pending-actions"><button class="btn" id="pChk">⟳ Check approval again</button><button class="btn sec" id="stOut">← Log out / Home</button></div></div></div>`;
+  $('#stOut').onclick = () => logout();
+  $('#pChk').onclick = async () => { if (!online()) return toast('Connect to the internet to check'); const r = await tryServerLogin(u.username, u.hash);
+    if (r.ok) { toast('Approved ✓ – welcome!'); await pullNow(false); go(landingFor(sessionUser() || u)); } else { toast(r.error || 'Still ' + (r.status || 'pending')); render(); } };
 }
 function contactInfo() { const c = db.settings.contact || {}; return c.whatsapp || c.phone || c.email || c.address ? c : {...DEFAULT_CONTACT}; }
 const waLink = n => 'https://wa.me/' + String(n || '').replace(/\D/g, '').replace(/^0/, '92');
@@ -597,7 +746,7 @@ function viewForgot() {
       <div class="row"><div><label>New password (6+)</label><input id="fpNew" type="password" autocomplete="new-password"></div><div><label>Repeat</label><input id="fpNew2" type="password" autocomplete="new-password"></div></div>
       <button class="btn" id="fpSave">Set new password</button><button class="btn sec" id="fpBack">Start again</button>
       <p class="muted">For safety: 5 wrong answers per hour; the account locks after 10 wrong answers and then only the admin can reset it.</p>`}
-    <div style="margin-top:12px"><button class="btn sec sm" onclick="STATE_reset_fp(); go('home')">← Back to login</button></div></div></div>`;
+    <div style="margin-top:12px"><button class="btn sec sm" onclick="STATE_reset_fp(); go(STATE_lastLogin())">← Back to login</button></div></div></div>`;
   const send = async btn => { btn.disabled = true;
     try { const ident = fo.username || $('#foId').value.trim(); const r = await otpSend(ident, fo.username ? '' : $('#foCls').value); STATE.fo = {...r, ident}; viewForgot(); toast('Code sent to ' + r.masked); }
     catch (e) { if (/^choose_class/.test(e.message)) { STATE.fo = {ident: $('#foId').value.trim(), needCls: true}; viewForgot(); } toast(e.message.replace(/^choose_class:\s*/, '')); } finally { btn.disabled = false; } };
@@ -605,7 +754,7 @@ function viewForgot() {
   else {
     $('#foResend').onclick = e => send(e.target); $('#foBack').onclick = () => { STATE.fo = {}; viewForgot(); };
     $('#foSave').onclick = async () => { const n = $('#foNew').value; if (n !== $('#foNew2').value) return toast('Passwords do not match');
-      try { await otpReset(fo.username, $('#foCode').value, n); STATE.fo = {}; STATE.authMode = 'login'; toast('Password changed ✓ – please log in'); go('home'); } catch (e) { toast(e.message); } };
+      try { await otpReset(fo.username, $('#foCode').value, n); STATE.fo = {}; toast('Password changed ✓ – please log in'); go(STATE.lastLogin || 'home'); } catch (e) { toast(e.message); } };
   }
   if (!st.username) $('#fpNext').onclick = async () => {
     try { const ident = $('#fpId').value.trim(); if (!ident) return toast('Enter username or roll number'); const r = await forgotQuestion(ident, $('#fpCls').value); STATE.fp = {...r, ident}; viewForgot(); }
@@ -613,9 +762,10 @@ function viewForgot() {
   else {
     $('#fpBack').onclick = () => { STATE.fp = {}; viewForgot(); };
     $('#fpSave').onclick = async () => { const n = $('#fpNew').value; if (n !== $('#fpNew2').value) return toast('Passwords do not match');
-      try { await forgotReset(st.username, $('#fpAns').value, n); STATE.fp = {}; STATE.authMode = 'login'; toast('Password changed ✓ – please log in'); go('home'); } catch (e) { toast(e.message); } };
+      try { await forgotReset(st.username, $('#fpAns').value, n); STATE.fp = {}; toast('Password changed ✓ – please log in'); go(STATE.lastLogin || 'home'); } catch (e) { toast(e.message); } };
   }
 }
+window.STATE_lastLogin = () => STATE.lastLogin || 'home';
 window.STATE_reset_fp = () => { STATE.fp = {}; STATE.fo = {}; };
 function bindAnnFiles(root = document) {
   $$('[data-annimg]', root).forEach(async img => { try { const m = await loadMod('ann'); img.src = await m.annFileURL(img.dataset.annimg); } catch (e) { img.replaceWith(Object.assign(document.createElement('span'), {className: 'muted', textContent: '🖼 image available when online'})); } });
@@ -630,8 +780,10 @@ function viewHome() {
   app().innerHTML = `
   <div class="card"><div class="card-h"><h2>Assalam-o-Alaikum, ${esc(m.name)} 👋</h2><span class="ur">خوش آمدید</span></div>
     <div class="muted">Subjects: ${esc((m.subjects || []).join(', ') || 'all')} · Classes: ${esc((m.classes || []).join(', ') || 'all')}</div>
-    <button class="btn" onclick="go('entry')">➕ Enter today's test</button><button class="btn sec" onclick="go('tdash')">📊 Class insights</button><button class="btn sec" onclick="syncNow(true)">⟳ Sync now</button>
+    <button class="btn sec sm" onclick="syncNow(true)">⟳ Sync now</button>
   </div>
+  ${tilesHTML([['entry', '➕', 'Enter Marks', 'Record today\'s test'], ['mystudents', '👥', 'My Students', 'Class list & search'], ['tdash', '🏫', 'My Classes', 'Insights & my subjects'], ['report', '🗓️', 'Reports', 'Weekly / monthly'],
+    ['notes', '📚', 'Notes', 'Share with classes'], ['chat', '💬', 'Chat', 'Class chat'], ['ann', '📢', 'Announcements', 'School news']].concat(m.role === 'owner' ? [['admin', '🛡️', 'Admin Panel', 'Approve & manage']] : []), 'tTiles')}
   <div class="kpis">
     <div class="kpi"><div class="l">Tests entered by you</div><div class="v">${mine.length}</div></div>
     <div class="kpi"><div class="l">This week (all)</div><div class="v">${testsIn({from: wf, to: wt}).length}</div><div class="s">${fmtD(wf)} – ${fmtD(wt)}</div></div>
@@ -652,16 +804,18 @@ function viewEntry() {
   const cls = edit ? testCk(edit) : (STATE.entryCls && classes.includes(STATE.entryCls) ? STATE.entryCls : classes[0]);
   app().innerHTML = `<div class="card"><div class="card-h"><h2>${edit ? 'Edit test' : 'Daily test entry'} <span class="ur">روزانہ ٹیسٹ اندراج</span></h2></div>
     <div class="row">
-      <div><label>Date <span class="ur">تاریخ</span></label><input type="date" id="eDate" value="${edit ? edit.date : (STATE.entryDate || today())}"></div>
-      <div><label>Class <span class="ur">کلاس</span></label><select id="eCls">${opts(classes, cls)}</select></div>
-      <div><label>Subject <span class="ur">مضمون</span></label><select id="eSub">${opts(subjects, edit ? edit.subject : STATE.entrySub)}</select></div>
-      <div><label>Total marks <span class="ur">کل نمبر</span></label><input type="number" id="eTotal" min="1" inputmode="numeric" value="${edit ? edit.total : (STATE.entryTotal || '')}" placeholder="e.g. 25"></div>
+      <div><label>1 · Class <span class="ur">کلاس</span></label><select id="eCls">${opts(classes, cls)}</select></div>
+      <div><label>2 · Subject <span class="ur">مضمون</span></label><select id="eSub">${opts(subjects, edit ? edit.subject : STATE.entrySub)}<option value="__add">➕ Add subject…</option></select>
+        <div id="eSubAdd" class="addsub hidden"><input id="eSubNew" placeholder="New subject, e.g. Computer Science" maxlength="40"><button class="btn sm" id="eSubSave">Add</button><button class="btn sm sec" id="eSubX">✕</button></div></div>
+      <div><label>3 · Test date <span class="ur">تاریخ</span></label><input type="date" id="eDate" value="${edit ? edit.date : (STATE.entryDate || today())}"></div>
+      <div><label>4 · Total marks <span class="ur">کل نمبر</span></label><input type="number" id="eTotal" min="1" inputmode="numeric" value="${edit ? edit.total : (STATE.entryTotal || '')}" placeholder="e.g. 25"></div>
     </div></div>
   <div class="card"><div class="card-h"><h3>Students <span class="ur">طلبہ</span></h3><span class="muted">Tick <b>Leave</b> (or leave marks empty) for a student on leave · <span class="ur">چھٹی</span></span></div>
+    <input id="eQ" type="search" placeholder="🔍 Find a student by name or roll" class="esearch">
     <div class="tbl-wrap"><table id="eTbl"><thead><tr><th style="width:90px">Roll # <span class="ur">رول</span></th><th>Name <span class="ur">نام</span></th><th style="width:110px">Obtained <span class="ur">حاصل</span></th><th style="width:76px">Leave <span class="ur">چھٹی</span></th><th class="num" style="width:70px">%</th><th style="width:40px"></th></tr></thead><tbody></tbody></table></div>
-    <button class="btn sec sm" id="addRow">+ Add student</button>
+    <button class="btn sec sm" id="addRow">+ Add student</button><button class="btn sec sm" id="toMyStu" onclick="go('mystudents', {myStuCls: document.getElementById('eCls').value, scrollTo: 'msForm'})">🎓 Add student to class list</button>
     <div id="eSummary" class="muted" style="margin-top:10px"></div>
-    <div style="margin-top:8px"><button class="btn" id="saveTest">💾 Save test</button>${edit ? '<button class="btn sec" id="cancelEdit">Cancel</button>' : ''}</div>
+    <div style="margin-top:8px"><button class="btn big" id="saveTest">${edit ? '💾 Save changes' : '✅ Submit marks'}</button>${edit ? '<button class="btn sec" id="cancelEdit">Cancel</button>' : ''}</div>
   </div>`;
   const tbody = $('#eTbl tbody');
   const addRow = (r = {}) => { const tr = document.createElement('tr');
@@ -673,22 +827,32 @@ function viewEntry() {
     if (edit && $('#eCls').value === testCk(edit)) { edit.rows.forEach(r => addRow({...r, leave: r.obt == null})); roster.filter(s => !edit.rows.some(r => r.roll === s.roll)).forEach(s => addRow(s)); }
     else if (roster.length) roster.forEach(s => addRow(s)); else for (let i = 0; i < 5; i++) addRow({roll: String(i + 1)});
     recalc(); };
+  $('#eQ').oninput = () => { const q = $('#eQ').value.trim().toLowerCase(); $$('#eTbl tbody tr').forEach(tr => { const t = ($('.eRoll', tr).value + ' ' + $('.eName', tr).value + ' ' + rosterFather($('#eCls').value, $('.eRoll', tr).value.trim())).toLowerCase(); tr.classList.toggle('hidden', !!q && !q.split(/\s+/).every(w => t.includes(w))); }); };
   function recalc() {
-    const total = parseFloat($('#eTotal').value); let sum = 0, n = 0, ab = 0, bad = 0;
+    const total = parseFloat($('#eTotal').value); let sum = 0, n = 0, ab = 0, bad = 0, npass = 0;
     let empty = 0;
     $$('#eTbl tbody tr').forEach(tr => { const v = $('.eObt', tr).value.trim(); const cell = $('.ePct', tr); const lv = $('.eLeave', tr).checked || /^[al]$/i.test(v);
       if (lv) { cell.innerHTML = '<span class="badge warn">Leave</span>'; ab++; return; }
       if (v === '') { cell.textContent = ''; if ($('.eName', tr).value.trim()) empty++; return; }
       const o = parseFloat(v); if (isNaN(o) || (total && o > total) || o < 0) { cell.innerHTML = '<span class="down">check</span>'; bad++; return; }
-      n++; sum += o; cell.textContent = total ? p1(o / total * 100) : ''; });
-    $('#eSummary').innerHTML = total ? `Students with marks: <b>${n}</b> · Leave: <b>${ab}</b>${empty ? ` (+${empty} empty → leave)` : ''} · Class average: <b>${n ? p1(sum / n / total * 100) : '–'}</b>${bad ? ` · <span class="down">${bad} invalid</span>` : ''}` : 'Enter total marks to see percentages.';
+      n++; sum += o; const pc = total ? o / total * 100 : null; if (pc != null && isPass(pc, $('#eSub').value)) npass++; cell.innerHTML = total ? `${p1(pc)} ${passBadge(pc, $('#eSub').value)}` : ''; });
+    $('#eSummary').innerHTML = total ? `Students with marks: <b>${n}</b> · Leave: <b>${ab}</b>${empty ? ` (+${empty} empty → leave)` : ''} · Class average: <b>${n ? p1(sum / n / total * 100) : '–'}</b> · Pass (≥${passMark($('#eSub').value)}%): <b class="up">${npass}</b> · Fail: <b class="down">${n - npass}</b>${bad ? ` · <span class="down">${bad} invalid</span>` : ''}` : 'Enter total marks to see percentages.';
   }
   $('#eCls').onchange = () => { STATE.entryCls = $('#eCls').value; loadRoster(); };
+  let prevSub = $('#eSub').value === '__add' ? '' : $('#eSub').value;
+  const closeAdd = () => { $('#eSubAdd').classList.add('hidden'); if ($('#eSub').value === '__add') $('#eSub').value = prevSub; };
+  $('#eSub').onchange = () => { if ($('#eSub').value === '__add') { $('#eSubAdd').classList.remove('hidden'); $('#eSubNew').focus(); } else { prevSub = $('#eSub').value; STATE.entrySub = prevSub; closeAdd(); } };
+  $('#eSubX').onclick = closeAdd;
+  $('#eSubNew').onkeydown = e => { if (e.key === 'Enter') $('#eSubSave').click(); };
+  $('#eSubSave').onclick = () => { try { const r = addSubject($('#eSubNew').value); const sel = $('#eSub');
+      if (![...sel.options].some(o => o.value === r.name)) sel.insertBefore(new Option(r.name, r.name), sel.querySelector('option[value="__add"]'));
+      sel.value = r.name; prevSub = STATE.entrySub = r.name; $('#eSubNew').value = ''; $('#eSubAdd').classList.add('hidden');
+      toast(r.existed ? `"${r.name}" already exists – selected it` : `Subject "${r.name}" added ✓${online() ? '' : ' (will sync when online)'}`); } catch (e) { toast(e.message); } };
   $('#eTotal').oninput = recalc; $('#addRow').onclick = () => { const rolls = $$('.eRoll').map(i => parseInt(i.value)).filter(n => !isNaN(n)); addRow({roll: String(rolls.length ? Math.max(...rolls) + 1 : 1)}); };
   if (edit) $('#cancelEdit').onclick = () => { STATE.editId = null; go('tests'); };
   $('#saveTest').onclick = () => {
     const date = $('#eDate').value, cls = $('#eCls').value, subject = $('#eSub').value, total = parseFloat($('#eTotal').value);
-    if (!date || !cls || !subject) return toast('Choose date, class and subject');
+    if (!date || !cls || !subject || subject === '__add') return toast('Choose date, class and subject');
     if (!(total > 0)) return toast('Enter total marks');
     const rows = [], emptyRows = []; let err = '';
     $$('#eTbl tbody tr').forEach(tr => { const roll = $('.eRoll', tr).value.trim(), name = $('.eName', tr).value.trim(), v = $('.eObt', tr).value.trim();
@@ -706,25 +870,31 @@ function viewEntry() {
       teacherName: edit ? edit.teacherName : m.name, synced: false, updatedAt: new Date().toISOString()};
     if (edit) Object.assign(edit, rec); else db.tests.push(rec);
     rememberRoster(cls, rows); Object.assign(STATE, {entryCls: cls, entrySub: subject, entryDate: date, entryTotal: total, editId: null}); save();
-    toast(edit ? 'Test updated ✓' : 'Test saved ✓ (will sync when online)'); syncNow(false); go(edit ? 'tests' : 'entry');
+    const nM = rows.filter(r => r.obt != null).length, nL = rows.length - nM;
+    toast(edit ? 'Test updated ✓' : `✅ Marks submitted: ${subject}, ${cls} – ${nM} students${nL ? ` + ${nL} on leave` : ''}. ${online() ? 'Syncing…' : 'Saved offline – will sync when online.'}`); syncNow(false); go(edit ? 'tests' : 'entry');
   };
   loadRoster();
 }
 
 /* ------------------------------------------------------------------ tests list */
 function viewTests() {
-  const f = STATE.tf || {}; const list = testsIn({cls: f.cls, subject: f.sub}).reverse();
+  const f = STATE.tf || {}; const list = testsIn({cls: f.cls, subject: f.sub, from: f.from || undefined, to: f.to || undefined}).reverse();
   app().innerHTML = `<div class="card"><div class="card-h"><h2>All tests <span class="ur">تمام ٹیسٹ</span></h2><span class="muted">${list.length} tests</span></div>
-    <div class="filters"><select id="tfCls">${opts(allClassKeys(), f.cls, 'All classes')}</select><select id="tfSub">${opts(allSubjects(), f.sub, 'All subjects')}</select></div>
+    <div class="filters"><select id="tfCls">${opts(allClassKeys(), f.cls, 'All classes')}</select><select id="tfSub">${opts(allSubjects(), f.sub, 'All subjects')}</select>
+      <label class="mini">From <input type="date" id="tfFrom" value="${esc(f.from || '')}"></label><label class="mini">To <input type="date" id="tfTo" value="${esc(f.to || '')}"></label>
+      <input id="tfQ" type="search" placeholder="🔍 Search student, roll, father, teacher…" value="${esc(f.q || '')}"></div>
     ${list.length ? `<div class="tbl-wrap"><table><tr><th>Date</th><th>Class</th><th>Subject</th><th class="num">Total</th><th class="num">Students</th><th class="num">Avg</th><th>Teacher</th><th>Sync</th><th></th></tr>
-    ${list.map(t => `<tr><td>${fmtD(t.date)}</td><td>${esc(testCk(t))}</td><td>${esc(t.subject)}</td><td class="num">${t.total}</td><td class="num">${t.rows.length}</td><td class="num">${p1(classAvg([t]))}</td><td>${esc(t.teacherName)}</td>
+    ${list.map(t => `<tr data-q="${esc([t.subject, t.teacherName, testCk(t), ...t.rows.flatMap(r => [r.roll, r.name, rosterFather(testCk(t), r.roll)])].join(' ').toLowerCase())}"><td>${fmtD(t.date)}</td><td>${esc(testCk(t))}</td><td>${esc(t.subject)}</td><td class="num">${t.total}</td><td class="num">${t.rows.length}</td><td class="num">${p1(classAvg([t]))}</td><td>${esc(t.teacherName)}${t.updatedBy && t.updatedBy !== t.teacherName ? `<br><small class="muted">edited by ${esc(t.updatedBy)}</small>` : ''}</td>
       <td>${t.synced ? '<span class="badge">✓</span>' : '<span class="badge warn">queued</span>'}</td>
-      <td style="white-space:nowrap">${(t.teacherId === me().id || isAdmin()) ? `<button class="btn sm sec" data-edit="${t.id}">Edit</button><button class="btn sm red" data-del="${t.id}">Delete</button>` : ''}</td></tr>`).join('')}</table></div>` : '<div class="empty">No tests found.</div>'}</div>`;
-  $('#tfCls').onchange = $('#tfSub').onchange = () => { STATE.tf = {cls: $('#tfCls').value, sub: $('#tfSub').value}; render(); };
+      <td style="white-space:nowrap">${canEditTest(t) ? `<button class="btn sm sec" data-edit="${t.id}">Edit</button><button class="btn sm red" data-del="${t.id}">Delete</button>` : ''}</td></tr>`).join('')}</table></div>` : '<div class="empty">No tests found.</div>'}</div>`;
+  $('#tfCls').onchange = $('#tfSub').onchange = $('#tfFrom').onchange = $('#tfTo').onchange = () => { STATE.tf = {cls: $('#tfCls').value, sub: $('#tfSub').value, from: $('#tfFrom').value, to: $('#tfTo').value, q: $('#tfQ').value}; render(); };
+  const qf = () => { const q = $('#tfQ').value.trim().toLowerCase(); (STATE.tf = STATE.tf || {}).q = q; $$('tr[data-q]').forEach(r => r.classList.toggle('hidden', !!q && !q.split(/\s+/).every(w => r.dataset.q.includes(w)))); };
+  $('#tfQ').oninput = qf; qf();
   $$('[data-edit]').forEach(b => b.onclick = () => go('entry', {editId: b.dataset.edit}));
   $$('[data-del]').forEach(b => b.onclick = () => { if (!confirm('Delete this test?')) return; const t = db.tests.find(x => x.id === b.dataset.del);
     db.tests = db.tests.filter(x => x !== t); if (t.synced) db.deleted.push(t.id); save(); syncNow(false); render(); });
 }
+function rosterFather(c, roll) { const s = (db.students[c] || []).find(x => x.roll === String(roll)); return s ? s.father || '' : ''; }
 
 /* ------------------------------------------------------------------ settings (profile, sync, backup) */
 const SHEET_COLS = ['date', 'teacher', 'class', 'section', 'subject', 'roll_no', 'student_name', 'obtained', 'total', 'status', 'test_id'];
@@ -778,7 +948,7 @@ function bindPassword(after) {
 function viewSettings() {
   const u = sessionUser(), stu = u.role === 'student';
   if (u.mustChange) { app().innerHTML = `<div class="card annbar pin" style="cursor:default"><b>🔑 Please set a new password</b> – the admin gave you a temporary password. <span class="ur">نیا پاس ورڈ بنائیں</span></div>` + passwordHTML() + '<div class="card"><button class="btn red" id="pOut">Log out</button></div>';
-    bindPassword(() => render()); $('#pOut').onclick = logout; return; }
+    bindPassword(() => render()); $('#pOut').onclick = () => logout(); return; }
   app().innerHTML = (stu ? `<div class="card"><h2>My account <span class="ur">میرا اکاؤنٹ</span></h2><p><b>${esc(u.name)}</b> · ${esc(u.cls)} · Roll # ${esc(u.roll)} · username <code>${esc(u.username)}</code></p>
       <label>Recovery email (optional) <span class="ur">ای میل</span></label><input id="pEmail" type="email" inputmode="email" autocapitalize="none" value="${esc(u.email || '')}" placeholder="for a password reset code">
       <button class="btn" id="pSave">Save</button><button class="btn sec" onclick="syncNow(true)">⟳ Sync now</button><button class="btn red" id="pOut">Log out</button></div>` :
@@ -796,7 +966,7 @@ function viewSettings() {
     Last sync: ${db.settings.lastSync ? new Date(db.settings.lastSync).toLocaleString() : 'never'} · Waiting: ${pendingCount()}</p>
     <button class="btn" id="sSave">Save URL</button><button class="btn sec" onclick="syncNow(true)">⟳ Sync now</button><button class="btn sec" id="sPull">⬇ Download latest</button></div>` +
     (stu ? '' : backupHTML());
-  bindPassword(); $('#pOut').onclick = logout; $('#sPull').onclick = () => pullNow(true);
+  bindPassword(); $('#pOut').onclick = () => logout(); if (STATE.focusPw) { STATE.focusPw = false; const pc = document.querySelector('#cpOld'); if (pc) { pc.scrollIntoView({block: 'center'}); pc.focus(); } } $('#sPull').onclick = () => pullNow(true);
   $('#sSave').onclick = async () => { db.settings.scriptUrl = $('#sUrl').value.trim(); save(); toast('Saved');
     try { const s = await getJSON({action: 'status'}); db.settings.serverHasOwner = !!s.has_owner; const ow = db.users.find(x => x.role === 'owner' && !x.remote);
       if (!s.has_owner && ow && ow.hash) ow.ownerQueued = true; save(); } catch (e) {} syncNow(true); };
@@ -812,13 +982,17 @@ load();
 try { const q = new URLSearchParams(location.search).get('sync'); if (q && /^https:\/\/script\.google(usercontent)?\.com\/|^http:\/\/(localhost|127\.0\.0\.1)/.test(q)) { db.settings.scriptUrl = q; save(); history.replaceState(null, '', location.pathname + location.hash); } } catch (e) {}
 if (!db.settings.scriptUrl && DEFAULT_SCRIPT_URL) db.settings.scriptUrl = DEFAULT_SCRIPT_URL;
 Object.assign(window, {go, syncNow, pullNow, logout});
+$('#hdrLogout').onclick = () => logout();
+$('#userBtn').onclick = e => { e.stopPropagation(); renderUserMenu(); const d = $('#userMenu'), open = d.classList.toggle('hidden'); $('#userBtn').setAttribute('aria-expanded', String(!open)); };
+document.addEventListener('click', e => { if (!e.target.closest('#umenuWrap')) closeUserMenu(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeUserMenu(); $('#modal').classList.add('hidden'); } });
 $('#bell').onclick = () => go('ann');
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(e => console.warn('SW', e));
-VIEW = location.hash.slice(1) || 'home';
+VIEW = hashView() || 'home';
 async function boot() {
   if (online()) { // public info first: does an owner exist? school name/logo, public announcements
     try { const p = await Promise.race([getJSON({action: 'public'}), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 5000))]);
-      if (p.ok) { applyServerSettings(p.settings || {}); mergeAnn(p.announcements || [], true); }
+      if (p.ok) { applyServerSettings(p.settings || {}); mergeAnn(p.announcements || [], true); if (Array.isArray(p.honor)) db.publicHonor = p.honor; }
       const s = await getJSON({action: 'status'}); if (s.ok) db.settings.serverHasOwner = !!s.has_owner; save();
     } catch (e) { console.warn('status check failed', e); }
   }
@@ -828,8 +1002,8 @@ async function boot() {
 boot();
 
 export {db, $, $$, esc, uid, ymd, parseD, addDays, today, fmtD, pct, p1, r1, grade, gradeBadge, toast, weekRange, monthRange, daysBetween,
-  save, ck, splitCk, testCk, me, isAdmin, isOwner, myClasses, mySubjects, allClassKeys, allSubjects, applyBranding, testsIn, classAvg, go, STATE,
+  save, ck, splitCk, testCk, me, isAdmin, isOwner, myClasses, canEditTest, mySubjects, allClassKeys, allSubjects, applyBranding, testsIn, classAvg, go, STATE,
   render, app, opts, meStudent, sessionUser, updateNotesBadge, postJSON, getJSON, hashPw, logout, chipsHTML, bindChips, download, toCSV, flatRows, syncNow, pullNow, pendingCount,
   DEFAULT_NAME, rememberRoster, setUserStatus, adminResetPassword, adminSetEmail, fullName, splitName, contactHTML, SEC_QS, isLeave, backupHTML, bindBackup, backupJSON, exportCSV, online, getToken, annFor, annUnread, annVisible, updateBell, bindAnnFiles,
-  loadMod, approved, newPin, VIEW_NAME, mergeAnn};
+  passMark, isPass, passBadge, loadMod, approved, newPin, VIEW_NAME, mergeAnn, addSubject, addRosterStudent, renameSubjectLocal, tilesHTML, landingFor, contactInfo, waLink, honorMiniHTML};
 function VIEW_NAME() { return VIEW; }
