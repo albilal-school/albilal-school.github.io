@@ -273,6 +273,36 @@ function statusBtns(u) {
   return (u.status === 'pending' ? b('approved', '✓ Approve') + b('rejected', '✕ Reject', 'red') : u.status === 'approved' ? b('disabled', '⏸ Disable', 'red') : b('approved', u.status === 'rejected' ? '✓ Approve' : '▶ Enable'))
     + `<button class="btn sm sec" data-rpw="${esc(u.username)}">🔑 Reset password</button><button class="btn sm sec" data-em="${esc(u.username)}">✉️ Email</button>`;
 }
+/** full display name: name → first + last → username (never blank / cut) */
+const dispName = u => String(u.name || '').trim() || [u.first, u.last].filter(Boolean).join(' ').trim() || u.username || '–';
+/** Pending sign-up requests as cards (stack nicely on phones). Teachers: pick classes (incl. Class 8) & subjects, then approve. */
+function pendingReqHTML(role) {
+  const L = db.users.filter(u => u.role === role && u.status === 'pending').sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
+  if (!L.length) return '';
+  const chips = (key, all, sel) => `<div class="chips" data-${key}>${all.map(v => `<label class="chip ${sel.includes(v) ? 'on' : ''}"><input type="checkbox" value="${esc(v)}" ${sel.includes(v) ? 'checked' : ''}>${esc(v)}</label>`).join('')}</div>`;
+  return `<div class="reqs" id="${role}Reqs"><h3>⏳ Pending requests <span class="badge warn">${L.length}</span></h3>${L.map(u => `<div class="req" data-req="${esc(u.username)}">
+    <div class="req-h"><div class="req-name">${esc(dispName(u))}</div><span class="badge warn">pending</span></div>
+    <div class="req-meta"><span>${role === 'teacher' ? '👩‍🏫 Teacher request' : '🎓 Student request'}</span><span>@${esc(u.username)}</span>
+      ${role === 'student' ? `<span>🏫 ${esc(u.cls || '–')} · Roll ${esc(u.roll || '–')}</span>${u.father ? `<span>Father: ${esc(u.father)}</span>` : ''}` : ''}
+      ${u.phone ? `<span>📞 ${esc(u.phone)}</span>` : ''}${u.email ? `<span>✉️ ${esc(u.email)}</span>` : ''}${u.createdAt ? `<span>🗓️ ${fmtD(String(u.createdAt).slice(0, 10))}</span>` : ''}</div>
+    ${role === 'teacher' ? `<label>Classes this teacher may teach <small class="muted">(none = all)</small></label>${chips('rqcls', allClassKeys(), u.classes || [])}
+      <label>Subjects <small class="muted">(none = all)</small></label>${chips('rqsub', allSubjects(), u.subjects || [])}` : ''}
+    <div class="req-acts"><button class="btn" data-rqok="${esc(u.username)}">✓ Approve${role === 'teacher' ? ' as teacher' : ''}</button><button class="btn red" data-rqno="${esc(u.username)}">✕ Reject</button></div></div>`).join('')}</div>`;
+}
+function bindPendingReqs() {
+  $$('.req .chips input').forEach(i => i.onchange = () => i.parentElement.classList.toggle('on', i.checked));
+  $$('[data-rqno]').forEach(b => b.onclick = async () => { if (!confirm('Reject this request?')) return; b.disabled = true; await setUserStatus(b.dataset.rqno, 'rejected'); render(); });
+  $$('[data-rqok]').forEach(b => b.onclick = async () => { const un = b.dataset.rqok, card = b.closest('.req'), u = db.users.find(x => x.username === un); if (!u) return;
+    b.disabled = true;
+    if (u.role === 'teacher') { const classes = $$('[data-rqcls] input:checked', card).map(i => i.value), subjects = $$('[data-rqsub] input:checked', card).map(i => i.value);
+      if (classes.join(';') !== (u.classes || []).join(';') || subjects.join(';') !== (u.subjects || []).join(';')) {
+        try { if (!online()) throw new Error('Connect to the internet to assign classes'); const r = await postJSON(db.settings.scriptUrl, {action: 'admin_user_update', username: un, name: dispName(u), subjects: subjects.join(';'), classes: classes.join(';')});
+          if (!r.ok) throw new Error(r.error); Object.assign(u, {classes, subjects}); save(); } catch (e) { b.disabled = false; return toast(e.message); } } }
+    await setUserStatus(un, 'approved'); render(); });
+}
+/** phones: every .ptbl row becomes a card – each cell gets its column name as a label */
+function labelPtbls() { $$('table.ptbl').forEach(t => { const hs = [...t.querySelectorAll('tr:first-child th')].map(h => h.textContent.trim());
+  t.querySelectorAll('tr:not(:first-child):not(.subrow)').forEach(tr => [...tr.children].forEach((td, i) => { if (hs[i]) td.dataset.l = hs[i]; })); }); }
 function peopleBoxesHTML() {
   return `<div id="rpwBox" class="card hidden" style="background:#fffbea"><h3>🔑 Reset password for <span id="rpwWho"></span></h3>
       <div class="row"><div><label>Temporary password</label><input id="rpwPass" autocomplete="off"></div><div><label>&nbsp;</label><label class="chk"><input type="checkbox" id="rpwForce" checked> Must change it at next login</label></div></div>
@@ -288,12 +318,13 @@ function teachersSecHTML() {
   const open = STATE.tOpen || '';
   return `<div class="card" id="teachersSec"><div class="card-h"><h2>👩‍🏫 Teachers <span class="ur">اساتذہ</span></h2><span class="badge ${cnt('pending') ? 'warn' : ''}">${cnt('pending')} pending</span></div>
     <div class="kpis" id="tKpis">${kpi('Total teachers', T.length)}${kpi('Approved', cnt('approved'))}${kpi('Pending', cnt('pending'), cnt('pending') ? 'waiting for you' : '', cnt('pending') ? 'down' : '')}${kpi('Disabled', cnt('disabled') + cnt('rejected'), cnt('rejected') ? `${cnt('rejected')} rejected` : '')}</div>
+    ${pendingReqHTML('teacher')}
     <div class="filters"><div><label>Search</label><input id="tSearch" placeholder="Name, username, phone, subject…" value="${esc(STATE.tQ || '')}"></div>
       <div><label>Status</label><select id="tStF">${optsKV([['', 'All'], ['pending', 'Pending'], ['approved', 'Approved'], ['disabled', 'Disabled'], ['rejected', 'Rejected']], f)}</select></div></div>
     ${list.length ? `<div class="tbl-wrap"><table id="tTbl" class="ptbl"><tr><th>Name</th><th>Username</th><th>Phone / email</th><th>Subjects</th><th>Classes</th><th>Status</th><th>Joined</th><th>Last sync</th><th class="num">Tests</th><th>Actions</th></tr>
       ${list.map(u => { const mine = db.tests.filter(t => t.teacherName === u.name || t.teacherId === u.id);
         const q = [u.name, u.username, u.phone, u.email, ...(u.subjects || []), ...(u.classes || [])].join(' ').toLowerCase();
-        return `<tr data-q="${esc(q)}" data-user="${esc(u.username)}"><td><b>${esc(u.name)}</b>${u.mustChange ? ' <span class="badge warn">must change pw</span>' : ''}</td><td>${esc(u.username)}</td>
+        return `<tr data-q="${esc(q)}" data-user="${esc(u.username)}"><td class="pname"><b>${esc(dispName(u))}</b>${u.mustChange ? ' <span class="badge warn">must change pw</span>' : ''}</td><td>${esc(u.username)}</td>
           <td>${esc(u.phone || '–')}${u.email ? `<div class="muted" style="font-size:12px">✉️ ${esc(u.email)}</div>` : ''}</td><td>${esc((u.subjects || []).join(', ') || 'all')}</td><td>${esc((u.classes || []).join(', ') || 'all')}</td>
           <td>${stBadge(u.status)}</td><td>${u.createdAt ? fmtD(String(u.createdAt).slice(0, 10)) : '–'}</td><td>${ago(u.lastSeen)}</td><td class="num">${mine.length}</td>
           <td class="acts">${statusBtns(u)}<button class="btn sm sec" data-tedit="${esc(u.username)}">✏️ Edit</button><button class="btn sm sec" data-ttests="${esc(u.username)}">📋 Tests</button></td></tr>
@@ -357,13 +388,14 @@ function studentsSecHTML() {
   const nP = all.filter(r => r.status === 'pending').length, nA = all.filter(r => r.status === 'approved').length;
   return `<div class="card" id="studentsSec"><div class="card-h"><h2>🎓 Students <span class="ur">طلبہ</span></h2><span class="badge ${nP ? 'warn' : ''}">${nP} pending</span></div>
     <div class="kpis" id="sKpisA">${kpi('Total students', all.length, `${all.filter(r => !r.acct).length} without login`)}${kpi('Approved logins', nA)}${kpi('Pending', nP, nP ? 'waiting for you' : '', nP ? 'down' : '')}${kpi('Classes', Object.keys(byCls).length)}</div>
+    ${pendingReqHTML('student')}
     <div class="chips" id="byCls">${Object.entries(byCls).map(([c, n]) => `<button class="chip ${fc === c ? 'on' : ''}" data-stcls="${esc(c)}">${esc(c)} <b>${n}</b></button>`).join('')}</div>
     <div class="filters"><div><label>Search</label><input id="stSearch" placeholder="Roll, name, father, username…" value="${esc(STATE.stQ || '')}"></div>
       <div><label>Class</label><select id="stClsF">${opts(allClassKeys(), fc, 'All classes')}</select></div>
       <div><label>Status</label><select id="stStF">${optsKV([['', 'All'], ['pending', 'Pending'], ['approved', 'Approved'], ['disabled', 'Disabled'], ['rejected', 'Rejected'], ['none', 'No login yet']], fs)}</select></div></div>
     ${list.length ? `<div class="tbl-wrap"><table id="stTblA" class="ptbl"><tr><th>Roll</th><th>Name</th><th>Father</th><th>Class</th><th>Status</th><th class="num">Overall %</th><th>Actions</th></tr>
       ${list.map(r => { const q = [r.roll, r.name, r.father, r.cls, r.acct ? r.acct.username : '', r.acct ? r.acct.email : ''].join(' ').toLowerCase();
-        return `<tr data-q="${esc(q)}" data-sk="${esc(r.cls + '|' + r.roll)}"><td>${esc(r.roll)}</td><td><b>${esc(r.name)}</b>${r.acct ? `<div class="muted" style="font-size:12px">@${esc(r.acct.username)}${r.acct.email ? ' · ✉️ ' + esc(r.acct.email) : ''}</div>` : ''}${r.addedBy ? `<div class="muted" style="font-size:12px">added by ${esc(r.addedBy)}</div>` : ''}</td>
+        return `<tr data-q="${esc(q)}" data-sk="${esc(r.cls + '|' + r.roll)}"><td>${esc(r.roll)}</td><td class="pname"><b>${esc(r.name || (r.acct ? dispName(r.acct) : '–'))}</b>${r.acct ? `<div class="muted" style="font-size:12px">@${esc(r.acct.username)}${r.acct.email ? ' · ✉️ ' + esc(r.acct.email) : ''}</div>` : ''}${r.addedBy ? `<div class="muted" style="font-size:12px">added by ${esc(r.addedBy)}</div>` : ''}</td>
           <td>${esc(r.father || '–')}</td><td>${esc(r.cls)}</td><td>${stBadge(r.status)}</td><td class="num">${r.pct == null ? '–' : gradeBadge(r.pct)}</td>
           <td class="acts">${r.acct ? statusBtns(r.acct) : ''}<button class="btn sm sec" data-sres="${esc(r.cls + '|' + r.roll)}">📈 Results</button>${r.roster ? `<button class="btn sm sec" data-sed2="${esc(r.cls + '|' + r.roll)}">✏️ Edit</button><button class="btn sm red" data-sdel2="${esc(r.cls + '|' + r.roll)}">🗑 Delete</button>` : ''}</td></tr>`; }).join('')}</table></div>`
       : '<div class="empty">No students match.</div>'}
@@ -373,7 +405,7 @@ function bindPeopleSec() {
   const live = (inp, tbl, k) => { const el = $(inp); if (!el) return; const f = () => { const q = el.value.trim().toLowerCase(); STATE[k] = el.value;
     $$(`${tbl} tr[data-q]`).forEach(tr => { const hide = q && !tr.dataset.q.includes(q); tr.style.display = hide ? 'none' : ''; const n = tr.nextElementSibling; if (n && n.classList.contains('subrow')) n.style.display = hide ? 'none' : ''; }); };
     el.oninput = f; f(); };
-  live('#tSearch', '#tTbl', 'tQ'); live('#stSearch', '#stTblA', 'stQ');
+  live('#tSearch', '#tTbl', 'tQ'); live('#stSearch', '#stTblA', 'stQ'); bindPendingReqs(); labelPtbls();
   if ($('#tStF')) $('#tStF').onchange = e => { STATE.tF = e.target.value; render(); };
   $$('[data-tedit]').forEach(b => b.onclick = () => { STATE.tEdit = STATE.tEdit === b.dataset.tedit ? '' : b.dataset.tedit; render(); });
   if ($('#teSave')) $('#teSave').onclick = async () => { const un = STATE.tEdit, name = $('#teName').value.trim(); if (!name) return toast('Name required');
@@ -509,7 +541,7 @@ function cardHTML(cls, roll, type, f, t, src) {
   const {grade: g, section} = splitCk(cls);
   const ro = (db.students[cls] || []).find(x => x.roll === roll) || {}; const nm = (src && src.student && src.student.name) || fullName(ro) || s.name, fa = (src && src.student && src.student.father) || ro.father || '';
   return `<div class="rc"><div class="hd"><img class="logo" src="${esc(logo())}" alt=""><h1>${esc(school())}</h1><div>Student Result Card · <span class="ur">رزلٹ کارڈ</span></div><div class="muted">${periodLabel(type, f, t)}</div></div>
-    <div class="meta"><div><b>Name:</b> ${esc(nm)}</div><div><b>Father's Name:</b> ${esc(fa || '–')}</div><div><b>Roll No:</b> ${esc(s.roll)}</div><div><b>Class:</b> ${esc(g)} (Matric)</div><div><b>Section:</b> ${esc(section)}</div></div>
+    <div class="meta"><div><b>Name:</b> ${esc(nm)}</div><div><b>Father's Name:</b> ${esc(fa || '–')}</div><div><b>Roll No:</b> ${esc(s.roll)}</div><div><b>Class:</b> ${esc(g)}${/^(9|10)th$/.test(g) ? ' (Matric)' : ''}</div><div><b>Section:</b> ${esc(section)}</div></div>
     <table><tr><th>Subject</th><th class="num">Tests</th><th class="num">Leave</th><th class="num">Obtained</th><th class="num">Total</th><th class="num">%</th><th>Grade</th><th>Result</th></tr>
     ${Object.entries(s.subj).map(([k, v]) => `<tr><td>${esc(k)}</td><td class="num">${v.tests}</td><td class="num">${v.leave}</td><td class="num">${r1(v.obt)}</td><td class="num">${v.total}</td><td class="num">${p1(v.pct)}</td><td>${grade(v.pct)}</td><td>${v.pct == null ? 'Leave' : passBadge(v.pct, k)}</td></tr>`).join('')}
     <tr class="gt"><th>Grand total (all subjects)</th><th class="num">${s.tests}</th><th class="num">${s.leave}</th><th class="num">${r1(s.obt)}</th><th class="num">${s.total}</th><th class="num">${p1(s.pct)}</th><th>${grade(s.pct)}</th><th>${(() => { const fs = Object.entries(s.subj).filter(([k, v]) => v.pct != null && !isPass(v.pct, k)); return s.pct == null ? '' : fs.length ? `<span class="badge pf fail">Fail (${fs.length})</span>` : passBadge(s.pct); })()}</th></tr></table>
@@ -601,9 +633,9 @@ function peopleHTML() {
     <div id="emBox" class="card hidden" style="background:#eef6ff"><h3>✉️ Recovery email for <span id="emWho"></span></h3>
       <label>Email (leave empty to remove)</label><input id="emVal" type="email" inputmode="email" autocapitalize="none">
       <button class="btn" id="emSave">Save email</button><button class="btn sec" id="emCancel">Cancel</button><p class="muted">Used to send a 6-digit code on “Forgot password”.</p></div>
-    ${ppl.length ? `<div class="tbl-wrap"><table id="pplTbl"><tr><th>Name</th><th>Role</th><th>Class / roll</th><th>Father's name</th><th>Username</th><th class="num">Tests</th><th>Status</th><th></th></tr>${ppl.map(u => {
+    ${ppl.length ? `<div class="tbl-wrap"><table id="pplTbl" class="ptbl"><tr><th>Name</th><th>Role</th><th>Class / roll</th><th>Father's name</th><th>Username</th><th class="num">Tests</th><th>Status</th><th></th></tr>${ppl.map(u => {
       const tn = u.role === 'teacher' ? db.tests.filter(t => t.teacherName === u.name).length : '';
-      return `<tr><td>${esc(u.name)}</td><td>${u.role === 'teacher' ? '👩‍🏫 teacher' : '🎓 student'}</td><td>${u.role === 'student' ? esc(u.cls) + ' #' + esc(u.roll) : `<span class="muted">${esc((u.classes || []).join(', ') || 'all')}</span>`}</td>
+      return `<tr><td class="pname"><b>${esc(dispName(u))}</b></td><td>${u.role === 'teacher' ? '👩‍🏫 teacher' : '🎓 student'}</td><td>${u.role === 'student' ? esc(u.cls) + ' #' + esc(u.roll) : `<span class="muted">${esc((u.classes || []).join(', ') || 'all')}</span>`}</td>
         <td>${u.role === 'student' ? esc(u.father || ((db.students[u.cls] || []).find(x => x.roll === u.roll) || {}).father || '–') : ''}</td><td>${esc(u.username)}${u.mustChange ? ' <span class="badge warn">must change</span>' : ''}${u.email ? `<div class="muted" style="font-size:12px">✉️ ${esc(u.email)}</div>` : ''}</td><td class="num">${tn}</td><td><span class="badge ${u.status === 'pending' ? 'warn' : u.status === 'rejected' ? 'bad' : ''}">${esc(u.status)}</span></td>
         <td style="white-space:nowrap">${u.status !== 'approved' ? `<button class="btn sm" data-appr="${esc(u.username)}" data-st="approved">Approve</button>` : ''}${u.status !== 'rejected' ? `<button class="btn sm red" data-appr="${esc(u.username)}" data-st="rejected">${u.status === 'approved' ? 'Block' : 'Reject'}</button>` : ''}<button class="btn sm sec" data-rpw="${esc(u.username)}">🔑 Reset password</button><button class="btn sm sec" data-em="${esc(u.username)}">✉️ Email</button></td></tr>`; }).join('')}</table></div>`
       : '<div class="muted">Nobody here yet. Teachers and students use “sign-up” on the login screen.</div>'}</div>`;

@@ -1,7 +1,7 @@
 /* Albilal School System – Notes / Study Material (lazy-loaded).
    Files are kept in IndexedDB on the device (offline reading + offline upload queue)
    and uploaded to Google Drive through the Apps Script when online. */
-import {db, $, $$, esc, uid, fmtD, toast, save, me, isAdmin, myClasses, mySubjects, allClassKeys, allSubjects, STATE, render, app, opts,
+import {db, $, $$, esc, uid, fmtD, toast, save, me, isAdmin, myClasses, mySubjects, subjectsForClass, allClassKeys, allSubjects, STATE, render, app, opts,
   meStudent, sessionUser, updateNotesBadge, postJSON, getJSON, syncNow, logout} from './app.js';
 
 const MAX = 10 * 1024 * 1024; // 10 MB
@@ -43,7 +43,7 @@ export async function viewNotes() {
   const subsHere = [...new Set(db.notes.filter(n => !fCls || n.cls === fCls).map(n => n.subject))];
   app().innerHTML = `
   ${t ? `<div class="card"><div class="card-h"><h2>Share notes / study material <span class="ur">نوٹس اپ لوڈ کریں</span></h2></div>
-    <div class="filters"><div><label>Class &amp; section</label><select id="uCls">${opts(classes, STATE.uCls)}</select></div><div><label>Subject</label><select id="uSub">${opts(mySubjects(), STATE.uSub)}</select></div>
+    <div class="filters"><div><label>Class &amp; section</label><select id="uCls">${opts(classes, STATE.uCls)}</select></div><div><label>Subject</label><select id="uSub">${opts(subjectsForClass(classes.includes(STATE.uCls) ? STATE.uCls : classes[0], mySubjects()), STATE.uSub)}</select></div>
       <div><label>Type</label><select id="uKind"><option value="file">File (PDF, image, document)</option><option value="text" ${STATE.uKind === 'text' ? 'selected' : ''}>Text note</option></select></div></div>
     <label>Title <span class="ur">عنوان</span></label><input id="uTitle" placeholder="e.g. Chapter 3 – Kinematics summary">
     <label>Description (optional) <span class="ur">تفصیل</span></label><input id="uDesc" placeholder="What is it, which pages to read…">
@@ -64,6 +64,7 @@ export async function viewNotes() {
   // mark as seen (badge clears; NEW labels stay until next visit)
   const newest = db.notes.map(n => n.createdAt || '').sort().pop(); if (newest && newest > seenBefore) { db.settings.notesSeen[u.id] = newest; save(); updateNotesBadge(); }
   if (t) {
+    $('#uCls').onchange = () => { const sel = $('#uSub'), cur = sel.value, l = subjectsForClass($('#uCls').value, mySubjects()); sel.innerHTML = opts(l, l.includes(cur) ? cur : l[0]); };
     $('#uKind').onchange = () => { STATE.uKind = $('#uKind').value; $('#uFileBox').classList.toggle('hidden', STATE.uKind === 'text'); $('#uTextBox').classList.toggle('hidden', STATE.uKind !== 'text'); };
     $('#uSave').onclick = async () => {
       const kind = $('#uKind').value, title = $('#uTitle').value.trim(), cls = $('#uCls').value, subject = $('#uSub').value;

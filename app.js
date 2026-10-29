@@ -63,10 +63,14 @@ const DEFAULT_NAME = 'Albilal School System';
 // OPTIONAL: paste your Apps Script Web App URL here before publishing, so every phone syncs without typing it.
 // (It can also be given once as a link: https://<you>.github.io/albilal/?sync=<WEB_APP_URL>)
 const DEFAULT_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyA7VQFk32167btzweqNrVnIuDhzLVXo8Dq3uk9PS2QzomXOW6w6lUW2Ffeka4IDWvO/exec';
+// Subjects offered per grade. A grade not listed here shows every subject (9th / 10th keep the full list).
+const BASE_SUBJECTS = ['English', 'Urdu', 'Mathematics', 'Physics', 'Chemistry', 'Biology', 'Islamiat', 'Pakistan Studies', 'Tarjama-tul-Quran'];
+const CLASS_SUBJECTS = {'8th': ['Urdu', 'English', 'Islamiat', 'Mathematics', 'Science']};
 function freshDB() {
   return {
-    classes: [{grade: '9th', section: 'Boys'}, {grade: '9th', section: 'Girls'}, {grade: '10th', section: 'Boys'}, {grade: '10th', section: 'Girls'}],
-    subjects: ['English', 'Urdu', 'Mathematics', 'Physics', 'Chemistry', 'Biology', 'Islamiat', 'Pakistan Studies', 'Tarjama-tul-Quran'],
+    classes: [{grade: '8th', section: 'Boys'}, {grade: '8th', section: 'Girls'}, {grade: '9th', section: 'Boys'}, {grade: '9th', section: 'Girls'}, {grade: '10th', section: 'Boys'}, {grade: '10th', section: 'Girls'}],
+    subjects: ['English', 'Urdu', 'Mathematics', 'Physics', 'Chemistry', 'Biology', 'Islamiat', 'Pakistan Studies', 'Tarjama-tul-Quran', 'Science'],
+    classSubjects: JSON.parse(JSON.stringify(CLASS_SUBJECTS)),
     users: [], students: {}, tests: [], deleted: [], notes: [], deletedNotes: [], chat: {}, chatQueue: [], announcements: [], deletedAnn: [], approvalQueue: [], deletedStudents: [], pendingSubjects: [], subjectMeta: {}, publicHonor: [],
     settings: {schoolName: DEFAULT_NAME, logo: '', scriptUrl: DEFAULT_SCRIPT_URL, settingsDirty: false, rosterDirty: false, lastSync: '', lastPull: '', notesSeen: {}, annSeen: {}, honorLimit: 7,
       teachersCanAnnounce: 'no', passPercent: 40, passOverrides: {}, serverHasOwner: false, reportKey: '', contact: {...DEFAULT_CONTACT}}
@@ -74,7 +78,18 @@ function freshDB() {
 }
 let db;
 function load() { try { db = JSON.parse(localStorage.getItem(DB_KEY)) || freshDB(); } catch (e) { db = freshDB(); }
-  const f = freshDB(); for (const k in f) if (db[k] === undefined) db[k] = f[k]; for (const k in f.settings) if (db.settings[k] === undefined) db.settings[k] = f.settings[k]; }
+  const f = freshDB(); for (const k in f) if (db[k] === undefined) db[k] = f[k]; for (const k in f.settings) if (db.settings[k] === undefined) db.settings[k] = f.settings[k];
+  addClass8(); }
+/** one-time upgrade of phones that already have data: add Class 8 (Boys/Girls) + its subjects without touching anything else.
+    Runs once per device (flag), so if the owner later removes Class 8 in Admin it is not added back. */
+function addClass8() {
+  if (db.settings.class8Added) return;
+  const add = [{grade: '8th', section: 'Boys'}, {grade: '8th', section: 'Girls'}].filter(c => !db.classes.some(x => ck(x) === ck(c)));
+  db.classes = [...add, ...db.classes];
+  for (const s of CLASS_SUBJECTS['8th']) if (!db.subjects.some(x => x.toLowerCase() === s.toLowerCase())) db.subjects.push(s);
+  db.classSubjects = {...CLASS_SUBJECTS, ...(db.classSubjects || {})};
+  db.settings.class8Added = true;
+}
 function save() { localStorage.setItem(DB_KEY, JSON.stringify(db)); updateStatus(); }
 const ck = c => `${c.grade} ${c.section}`;
 const splitCk = k => { const i = k.lastIndexOf(' '); return {grade: k.slice(0, i), section: k.slice(i + 1)}; };
@@ -90,6 +105,10 @@ const hasOwner = () => db.users.some(u => u.role === 'owner') || db.settings.ser
 const canEditTest = t => isAdmin() || myClasses().includes(testCk(t)); // server enforces the same rule (class assignment)
 const myClasses = () => { const m = me(); const all = db.classes.map(ck); return m && m.classes && m.classes.length ? all.filter(c => m.classes.includes(c)) : all; };
 const mySubjects = () => { const m = me(); return m && m.subjects && m.subjects.length ? db.subjects.filter(s => m.subjects.includes(s)) : db.subjects; };
+/** subjects for a class key like "8th Boys": the grade's own list (if it has one) + subjects added for that grade; else the given list */
+const subjectsForClass = (cls, list = db.subjects) => { const g = cls ? splitCk(cls).grade : ''; const m = (db.classSubjects || {})[g];
+  if (!m || !m.length) { const only = new Set(Object.values(db.classSubjects || {}).flat().filter(x => !BASE_SUBJECTS.includes(x))); return list.filter(s => !only.has(s)); } // e.g. Science is Class 8 only
+  const own = list.filter(s => m.includes(s)); return own.length ? own : m.slice(); };
 const allClassKeys = () => [...new Set([...db.classes.map(ck), ...db.tests.map(testCk)])];
 const allSubjects = () => [...new Set([...db.subjects, ...db.tests.map(t => t.subject)])];
 const newPin = () => String(100000 + Math.floor(Math.random() * 900000)); // only used for temporary passwords
@@ -800,8 +819,9 @@ function viewHome() {
 function viewEntry() {
   const edit = STATE.editId ? db.tests.find(t => t.id === STATE.editId) : null;
   const classes = edit ? [...new Set([...myClasses(), testCk(edit)])] : myClasses();
-  const subjects = edit ? [...new Set([...mySubjects(), edit.subject])] : mySubjects();
   const cls = edit ? testCk(edit) : (STATE.entryCls && classes.includes(STATE.entryCls) ? STATE.entryCls : classes[0]);
+  const subsFor = c => { const l = subjectsForClass(c, mySubjects()); return edit && c === testCk(edit) && !l.includes(edit.subject) ? [...l, edit.subject] : l; };
+  const subjects = subsFor(cls);
   app().innerHTML = `<div class="card"><div class="card-h"><h2>${edit ? 'Edit test' : 'Daily test entry'} <span class="ur">روزانہ ٹیسٹ اندراج</span></h2></div>
     <div class="row">
       <div><label>1 · Class <span class="ur">کلاس</span></label><select id="eCls">${opts(classes, cls)}</select></div>
@@ -838,7 +858,10 @@ function viewEntry() {
       n++; sum += o; const pc = total ? o / total * 100 : null; if (pc != null && isPass(pc, $('#eSub').value)) npass++; cell.innerHTML = total ? `${p1(pc)} ${passBadge(pc, $('#eSub').value)}` : ''; });
     $('#eSummary').innerHTML = total ? `Students with marks: <b>${n}</b> · Leave: <b>${ab}</b>${empty ? ` (+${empty} empty → leave)` : ''} · Class average: <b>${n ? p1(sum / n / total * 100) : '–'}</b> · Pass (≥${passMark($('#eSub').value)}%): <b class="up">${npass}</b> · Fail: <b class="down">${n - npass}</b>${bad ? ` · <span class="down">${bad} invalid</span>` : ''}` : 'Enter total marks to see percentages.';
   }
-  $('#eCls').onchange = () => { STATE.entryCls = $('#eCls').value; loadRoster(); };
+  $('#eCls').onchange = () => { STATE.entryCls = $('#eCls').value; loadRoster();
+    const sel = $('#eSub'), cur = sel.value, l = subsFor(STATE.entryCls); // each class shows its own subjects (e.g. Class 8: Urdu, English, Islamiat, Mathematics, Science)
+    sel.innerHTML = opts(l, l.includes(cur) ? cur : (l.includes(STATE.entrySub) ? STATE.entrySub : l[0])) + '<option value="__add">➕ Add subject…</option>';
+    prevSub = sel.value; STATE.entrySub = prevSub; recalc(); };
   let prevSub = $('#eSub').value === '__add' ? '' : $('#eSub').value;
   const closeAdd = () => { $('#eSubAdd').classList.add('hidden'); if ($('#eSub').value === '__add') $('#eSub').value = prevSub; };
   $('#eSub').onchange = () => { if ($('#eSub').value === '__add') { $('#eSubAdd').classList.remove('hidden'); $('#eSubNew').focus(); } else { prevSub = $('#eSub').value; STATE.entrySub = prevSub; closeAdd(); } };
@@ -846,6 +869,7 @@ function viewEntry() {
   $('#eSubNew').onkeydown = e => { if (e.key === 'Enter') $('#eSubSave').click(); };
   $('#eSubSave').onclick = () => { try { const r = addSubject($('#eSubNew').value); const sel = $('#eSub');
       if (![...sel.options].some(o => o.value === r.name)) sel.insertBefore(new Option(r.name, r.name), sel.querySelector('option[value="__add"]'));
+      { const g = splitCk($('#eCls').value).grade; const m = (db.classSubjects || {})[g]; if (m && !m.includes(r.name)) { m.push(r.name); save(); } }
       sel.value = r.name; prevSub = STATE.entrySub = r.name; $('#eSubNew').value = ''; $('#eSubAdd').classList.add('hidden');
       toast(r.existed ? `"${r.name}" already exists – selected it` : `Subject "${r.name}" added ✓${online() ? '' : ' (will sync when online)'}`); } catch (e) { toast(e.message); } };
   $('#eTotal').oninput = recalc; $('#addRow').onclick = () => { const rolls = $$('.eRoll').map(i => parseInt(i.value)).filter(n => !isNaN(n)); addRow({roll: String(rolls.length ? Math.max(...rolls) + 1 : 1)}); };
@@ -1005,5 +1029,5 @@ export {db, $, $$, esc, uid, ymd, parseD, addDays, today, fmtD, pct, p1, r1, gra
   save, ck, splitCk, testCk, me, isAdmin, isOwner, myClasses, canEditTest, mySubjects, allClassKeys, allSubjects, applyBranding, testsIn, classAvg, go, STATE,
   render, app, opts, meStudent, sessionUser, updateNotesBadge, postJSON, getJSON, hashPw, logout, chipsHTML, bindChips, download, toCSV, flatRows, syncNow, pullNow, pendingCount,
   DEFAULT_NAME, rememberRoster, setUserStatus, adminResetPassword, adminSetEmail, fullName, splitName, contactHTML, SEC_QS, isLeave, backupHTML, bindBackup, backupJSON, exportCSV, online, getToken, annFor, annUnread, annVisible, updateBell, bindAnnFiles,
-  passMark, isPass, passBadge, loadMod, approved, newPin, VIEW_NAME, mergeAnn, addSubject, addRosterStudent, renameSubjectLocal, tilesHTML, landingFor, contactInfo, waLink, honorMiniHTML};
+  passMark, isPass, passBadge, subjectsForClass, loadMod, approved, newPin, VIEW_NAME, mergeAnn, addSubject, addRosterStudent, renameSubjectLocal, tilesHTML, landingFor, contactInfo, waLink, honorMiniHTML};
 function VIEW_NAME() { return VIEW; }
