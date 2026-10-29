@@ -108,7 +108,7 @@ export function viewStudentHome() {
   app().innerHTML = `<div class="card welcome"><div class="card-h"><h2>Assalam-o-Alaikum, ${esc(u.name)} 👋</h2><span class="ur">خوش آمدید</span></div>
       <div class="muted">Class <b>${esc(cls)}</b> · Roll # <b>${esc(roll)}</b> · Father: ${esc(u.father || '–')}</div></div>
     ${tilesHTML([['mine', '📈', 'My Results', 'Charts & all marks'], ['notes', '📚', 'Notes', 'From your teachers'], ['chat', '💬', 'Chat', 'Class chat'],
-      ['ann', '📢', 'Announcements', 'School news'], ['card', '🖨️', 'Result Card', 'Print / share'], ['account', '👤', 'Profile & Settings', 'Password, email']], 'sTiles')}
+      ['ann', '📢', 'Announcements', 'School news'], ['card', '🖨️', 'Result Card', 'Print / share'], ['timetable', '🕒', 'Timetable', 'My class periods'], ['account', '👤', 'Profile & Settings', 'Password, email']], 'sTiles')}
     <div class="kpis" id="sKpis">${kpi('Overall', me1 ? p1(me1.pct) : '–', me1 ? `${me1.tests} tests` : 'no tests yet')}${kpi('Last 30 days', m30 ? p1(m30.pct) : '–', m30 ? `${m30.tests} tests · ${m30.leave} leave` : '')}
       ${kpi('Class rank (30 days)', rank ? `#${rank}` : '–', rank ? `of ${ranked.length}` : '')}${kpi('Best subject', subs.length ? esc(subs[0][0]) : '–', subs.length ? p1(subs[0][1].pct) : '')}</div>
     <div class="grid2"><div class="card" id="sRecent"><div class="card-h"><h2>🆕 Latest results <span class="ur">تازہ نتائج</span></h2><button class="btn sm sec" onclick="go('mine')">All results →</button></div>
@@ -140,30 +140,31 @@ function myStudentsCardHTML() {
   const list = (db.students[c] || []).slice().sort((a, b) => (+a.roll || 0) - (+b.roll || 0) || String(a.roll).localeCompare(String(b.roll)));
   const acct = r => db.users.find(u => u.role === 'student' && u.cls === c && u.roll === r);
   const ed = STATE.msEdit ? list.find(x => x.roll === STATE.msEdit) : null; if (!ed) STATE.msEdit = '';
-  return `<div class="card" id="myStuCard"><div class="card-h"><h2>🎓 My students <span class="ur">میرے طلبہ</span></h2><span class="badge">${list.length} in ${esc(c)}</span></div>
-    <div class="row"><div><label>Class</label><select id="msCls">${opts(cls, c)}</select></div><div><label>Search</label><input id="msQ" type="search" placeholder="🔍 Name, roll or father's name"></div></div>
+  return `<div class="card" id="myStuCard"><div class="card-h"><h2>🎓 Class Students <span class="ur">کلاس کے طلبہ</span></h2><span class="badge">${list.length} in ${esc(c)}</span></div>
+    <div class="row"><div><label>Class</label><select id="msCls">${opts(cls, c)}</select></div><div><label>Search</label><input id="msQ" type="search" placeholder="🔍 Name, roll, father or mobile"></div></div>
     <div class="card" style="background:#f6faf8" id="msForm"><h3>${ed ? `✏️ Edit roll ${esc(ed.roll)} – ${esc(c)}` : '➕ Add a student'}</h3>
       <div class="row"><div><label>Roll Number *</label><input id="msRoll" inputmode="numeric" value="${ed ? esc(ed.roll) : ''}" ${ed ? 'disabled' : ''}></div><div><label>Class &amp; section *</label><select id="msCls2" ${ed ? 'disabled' : ''}>${opts(cls, c)}</select></div></div>
       <div class="row"><div><label>First Name *</label><input id="msFirst" value="${ed ? esc(ed.first || splitName(ed).first) : ''}"></div><div><label>Last Name *</label><input id="msLast" value="${ed ? esc(ed.last ?? splitName(ed).last) : ''}"></div></div>
-      <label>Father's Name *</label><input id="msFather" value="${ed ? esc(ed.father || '') : ''}">
+      <div class="row"><div><label>Father's Name *</label><input id="msFather" value="${ed ? esc(ed.father || '') : ''}"></div><div><label>Mobile Number <span class="ur">موبائل</span></label><input id="msPhone" type="tel" inputmode="tel" placeholder="03001234567" maxlength="20" value="${ed ? esc(ed.phone || '') : ''}"></div></div>
       ${ed ? '<button class="btn" id="msSave">💾 Save changes</button> <button class="btn sec" id="msCancel">Cancel</button>' : '<button class="btn" id="msAdd">➕ Add student</button>'}
       <p class="muted">The student is ready for marks entry at once. To log in, the student registers on the Student page with the same class + roll number (or the admin approves) – the account links to this entry. Deleting hides the student but keeps all their marks; the admin can restore.</p></div>
-    ${list.length ? `<div class="tbl-wrap"><table id="msTbl"><tr><th>Roll</th><th>Name</th><th>Father's name</th><th>Login account</th><th></th></tr>${list.map(x => { const a = acct(x.roll);
-      return `<tr data-q="${esc([x.roll, fullName(x), x.father].join(' ').toLowerCase())}"><td>${esc(x.roll)}</td><td>${esc(fullName(x))}${x.addedBy ? ` <small class="muted">· added by ${esc(x.addedBy)}</small>` : ''}${x.isNew || x.dirty ? ' <span class="badge warn">queued</span>' : ''}</td><td>${esc(x.father || '–')}</td><td>${a ? `<span class="badge ${a.status === 'approved' ? '' : 'warn'}">${esc(a.status)}</span>` : '<span class="muted">not registered</span>'}</td>
+    ${list.length ? `<div class="tbl-wrap"><table id="msTbl" class="ptbl"><tr><th>Roll</th><th>Name</th><th>Father's name</th><th>Mobile</th><th>Login account</th><th></th></tr>${list.map(x => { const a = acct(x.roll), ph = x.phone || (a && a.phone) || '';
+      return `<tr data-q="${esc([x.roll, fullName(x), x.father, ph].join(' ').toLowerCase())}"><td>${esc(x.roll)}</td><td class="pname">${esc(fullName(x))}${x.addedBy ? ` <small class="muted">· added by ${esc(x.addedBy)}</small>` : ''}${x.isNew || x.dirty ? ' <span class="badge warn">queued</span>' : ''}</td><td>${esc(x.father || '–')}</td><td>${ph ? `<a href="tel:${esc(ph.replace(/\s/g, ''))}">${esc(ph)}</a>` : '-'}</td><td>${a ? `<span class="badge ${a.status === 'approved' ? '' : 'warn'}">${esc(a.status)}</span>` : '<span class="muted">not registered</span>'}</td>
         <td class="acts"><button class="btn sm sec" data-msed="${esc(x.roll)}">Edit</button><button class="btn sm red" data-msdel="${esc(x.roll)}">Delete</button></td></tr>`; }).join('')}</table></div>`
       : '<div class="muted">No students in this class yet.</div>'}</div>`;
 }
 function bindMyStudents() {
-  if (!$('#myStuCard')) return; const c = STATE.myStuCls;
+  if (!$('#myStuCard')) return; const c = STATE.myStuCls; labelPtbls();
   $('#msCls').onchange = e => { STATE.myStuCls = e.target.value; STATE.msEdit = ''; render(); };
   const qf = () => { const q = ($('#msQ').value || '').trim().toLowerCase(); $$('#msTbl tr[data-q]').forEach(r => r.classList.toggle('hidden', !!q && !q.split(/\s+/).every(w => r.dataset.q.includes(w)))); };
   $('#msQ').oninput = qf;
-  if ($('#msAdd')) $('#msAdd').onclick = () => { try { const r = addRosterStudent({roll: $('#msRoll').value, first: $('#msFirst').value, last: $('#msLast').value, father: $('#msFather').value, cls: $('#msCls2').value});
+  if ($('#msAdd')) $('#msAdd').onclick = () => { try { const r = addRosterStudent({roll: $('#msRoll').value, first: $('#msFirst').value, last: $('#msLast').value, father: $('#msFather').value, phone: $('#msPhone').value, cls: $('#msCls2').value});
       toast(`Roll ${r.roll} added to ${r.cls} ✓`); STATE.myStuCls = r.cls; STATE.scrollTo = 'myStuCard'; render(); } catch (e) { toast(e.message); } };
   if ($('#msSave')) $('#msSave').onclick = () => { const rec = (db.students[c] || []).find(x => x.roll === STATE.msEdit); if (!rec) return;
-    const first = $('#msFirst').value.trim(), last = $('#msLast').value.trim(), father = $('#msFather').value.trim();
+    const first = $('#msFirst').value.trim(), last = $('#msLast').value.trim(), father = $('#msFather').value.trim(), phone = $('#msPhone').value.trim();
     if (!first || !last || !father) return toast('First, last and father\'s name are required');
-    Object.assign(rec, {first, last, father, name: `${first} ${last}`, dirty: true}); db.settings.rosterDirty = true; STATE.msEdit = ''; save(); toast('Student updated ✓'); window.syncNow(false); STATE.scrollTo = 'myStuCard'; render(); };
+    if (phone && !/^[0-9+\- ]{7,20}$/.test(phone)) return toast('Mobile number: digits only, e.g. 03001234567');
+    Object.assign(rec, {first, last, father, phone, name: `${first} ${last}`, dirty: true}); db.settings.rosterDirty = true; STATE.msEdit = ''; save(); toast('Student updated ✓'); window.syncNow(false); STATE.scrollTo = 'myStuCard'; render(); };
   if ($('#msCancel')) $('#msCancel').onclick = () => { STATE.msEdit = ''; render(); };
   $$('[data-msed]').forEach(b => b.onclick = () => { STATE.msEdit = b.dataset.msed; STATE.scrollTo = 'msForm'; render(); });
   $$('[data-msdel]').forEach(b => b.onclick = () => { const r = b.dataset.msdel, rec = (db.students[c] || []).find(x => x.roll === r); if (!rec) return;

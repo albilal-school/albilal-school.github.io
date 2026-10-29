@@ -71,7 +71,7 @@ function freshDB() {
     classes: [{grade: '8th', section: 'Boys'}, {grade: '8th', section: 'Girls'}, {grade: '9th', section: 'Boys'}, {grade: '9th', section: 'Girls'}, {grade: '10th', section: 'Boys'}, {grade: '10th', section: 'Girls'}],
     subjects: ['English', 'Urdu', 'Mathematics', 'Physics', 'Chemistry', 'Biology', 'Islamiat', 'Pakistan Studies', 'Tarjama-tul-Quran', 'Science'],
     classSubjects: JSON.parse(JSON.stringify(CLASS_SUBJECTS)),
-    users: [], students: {}, tests: [], deleted: [], notes: [], deletedNotes: [], chat: {}, chatQueue: [], announcements: [], deletedAnn: [], approvalQueue: [], deletedStudents: [], pendingSubjects: [], subjectMeta: {}, publicHonor: [],
+    users: [], students: {}, tests: [], deleted: [], notes: [], deletedNotes: [], chat: {}, chatQueue: [], announcements: [], deletedAnn: [], approvalQueue: [], deletedStudents: [], pendingSubjects: [], timetables: [], deletedTT: [], subjectMeta: {}, publicHonor: [],
     settings: {schoolName: DEFAULT_NAME, logo: '', scriptUrl: DEFAULT_SCRIPT_URL, settingsDirty: false, rosterDirty: false, lastSync: '', lastPull: '', notesSeen: {}, annSeen: {}, honorLimit: 7,
       teachersCanAnnounce: 'no', passPercent: 40, passOverrides: {}, serverHasOwner: false, reportKey: '', contact: {...DEFAULT_CONTACT}}
   };
@@ -133,7 +133,8 @@ function applyBranding() {
 function pendingCount() {
   return db.tests.filter(t => !t.synced).length + db.deleted.length + (db.settings.settingsDirty ? 1 : 0) + (db.settings.rosterDirty ? 1 : 0) + db.notes.filter(n => !n.synced).length +
     db.deletedNotes.length + db.users.filter(u => u.regQueued || u.ownerQueued || u.profileDirty).length + db.approvalQueue.length + db.chatQueue.length +
-    db.announcements.filter(a => !a.synced).length + db.deletedAnn.length + db.deletedStudents.length + db.pendingSubjects.length;
+    db.announcements.filter(a => !a.synced).length + db.deletedAnn.length + db.deletedStudents.length + db.pendingSubjects.length +
+    (db.settings.ttServer === 'old' ? 0 : db.timetables.filter(t => t.dirty).length + db.deletedTT.length);
 }
 function updateStatus() {
   const on = navigator.onLine; const n = $('#netStatus'); if (!n || !db) return;
@@ -187,7 +188,7 @@ async function syncNow(manual) {
     if (u.role !== 'student') {
       const pend = db.tests.filter(t => !t.synced);
       const body = {action: 'push', rows: pend.flatMap(flatRows), test_ids: pend.map(t => t.id), deleted: db.deleted.slice(), deleted_notes: db.deletedNotes.slice()};
-      if (db.settings.rosterDirty) body.students = Object.entries(db.students).flatMap(([k, list]) => list.filter(s => s.isNew || s.dirty).map(s => { const n = splitName(s); return {class: splitCk(k).grade, section: splitCk(k).section, roll_no: s.roll, first_name: n.first, last_name: n.last, father_name: s.father || '', student_name: n.full, new: s.isNew ? 'yes' : ''}; }));
+      if (db.settings.rosterDirty) body.students = Object.entries(db.students).flatMap(([k, list]) => list.filter(s => s.isNew || s.dirty).map(s => { const n = splitName(s); return {class: splitCk(k).grade, section: splitCk(k).section, roll_no: s.roll, first_name: n.first, last_name: n.last, father_name: s.father || '', student_name: n.full, phone: s.phone || '', new: s.isNew ? 'yes' : ''}; }));
       const delS = db.deletedStudents.slice(); if (delS.length) body.deleted_students = delS.map(k => { const [c, sc, r] = k.split('|'); return {class: c, section: sc, roll_no: r}; });
       if (db.settings.settingsDirty && u.role === 'owner') body.settings = {school_name: db.settings.schoolName, logo: db.settings.logo, honor_limit: db.settings.honorLimit,
         classes_json: JSON.stringify(db.classes), subjects_json: JSON.stringify(db.subjects), teachers_can_announce: db.settings.teachersCanAnnounce, contact_json: JSON.stringify(db.settings.contact || {}),
@@ -199,6 +200,13 @@ async function syncNow(manual) {
       pend.forEach(t => t.synced = true); db.deleted = db.deleted.filter(id => !body.deleted.includes(id)); db.deletedNotes = db.deletedNotes.filter(id => !body.deleted_notes.includes(id));
       if (body.settings) { db.settings.settingsDirty = false; db.settings.subjectRenames = {}; } if (body.students) { db.settings.rosterDirty = false; Object.values(db.students).forEach(l => l.forEach(x => { delete x.isNew; delete x.dirty; })); if (res.forbidden_students) toast('Not your class – not saved: ' + res.forbidden_students.join(', ')); } if (body.deleted_students) db.deletedStudents = db.deletedStudents.filter(x => !delS.includes(x)); save();
       if (db.notes.some(n => !n.synced)) await (await loadMod('notes')).uploadPendingNotes(url);
+    }
+    if (u.role === 'owner' && db.settings.ttServer !== 'old') { // 3b) timetables (owner) – needs the v11 Apps Script
+      for (const id of db.deletedTT.slice()) { const r = await postJSON(url, {action: 'tt_delete', tt_id: id}); if (!r.ok && /unknown action/i.test(r.error || '')) { db.settings.ttServer = 'old'; break; } db.deletedTT = db.deletedTT.filter(x => x !== id); save(); }
+      for (const t of db.timetables.filter(x => x.dirty)) { if (db.settings.ttServer === 'old') break; const {dirty, synced, ...data} = t;
+        const r = await postJSON(url, {action: 'tt_save', tt_id: t.id, name: t.name, data_json: JSON.stringify(data)});
+        if (!r.ok && /unknown action/i.test(r.error || '')) { db.settings.ttServer = 'old'; break; }
+        if (r.ok) { t.dirty = false; t.synced = true; } else toast('Timetable: ' + r.error); save(); }
     }
     if (db.announcements.some(a => !a.synced) || db.deletedAnn.length) await (await loadMod('ann')).uploadPendingAnn(url);
     if (db.chatQueue.length) await (await loadMod('chat')).flushChat();
@@ -220,7 +228,7 @@ async function pullNow(manual) {
     (res.users || []).forEach(su => { const ex = db.users.find(x => x.username === su.username); if (ex) { if (!ex.profileDirty) Object.assign(ex, userFromServer(su, ex)); } else db.users.push({id: 'r_' + su.username, remote: true, ...userFromServer(su, {})}); });
     if (res.users) { const names = new Set(res.users.map(x => x.username)); db.users = db.users.filter(x => !x.remote || names.has(x.username)); }
     if (res.students) res.students.forEach(s => { const key = `${s.class} ${s.section}`; const list = db.students[key] = db.students[key] || [];
-      const o = {name: s.student_name, first: s.first_name || '', last: s.last_name || '', father: s.father_name || '', addedBy: s.added_by || ''};
+      const o = {name: s.student_name, first: s.first_name || '', last: s.last_name || '', father: s.father_name || '', addedBy: s.added_by || '', phone: s.phone || ''};
       const ex = list.find(x => x.roll === String(s.roll_no)); if (ex) { if (!ex.dirty && !ex.isNew) for (const k in o) if (o[k]) ex[k] = o[k]; } else list.push({roll: String(s.roll_no), ...o}); });
     if (res.deleted_students) res.deleted_students.forEach(k => { const i = k.lastIndexOf('|'), c = k.slice(0, i), r = k.slice(i + 1); if (db.students[c]) db.students[c] = db.students[c].filter(x => x.roll !== r || x.isNew); });
     if (res.notes) { const remoteIds = new Set(res.notes.map(n => n.note_id));
@@ -229,6 +237,7 @@ async function pullNow(manual) {
         db.notes.push({id: rn.note_id, cls: `${rn.class} ${rn.section}`, subject: rn.subject, title: rn.title, desc: rn.description, kind: rn.kind, text: rn.text,
           fileName: rn.file_name, mime: rn.mime, size: Number(rn.size) || 0, fileId: rn.file_id, url: rn.file_url, teacherName: rn.teacher, createdAt: rn.created_at, synced: true}); }); }
     if (res.announcements) mergeAnn(res.announcements);
+    mergeTimetables(res.timetables);
     if (res.my_stats) db.myStats = res.my_stats; if (Array.isArray(res.honor)) db.publicHonor = res.honor;
     if (res.deleted_rows) db.deletedRows = res.deleted_rows; if (res.audit) db.audit = res.audit;
     db.settings.lastPull = new Date().toISOString(); save(); applyBranding();
@@ -253,16 +262,18 @@ function renameSubjectLocal(from, to) {
 }
 /** An approved teacher (or the owner) adds a new subject: shared list, auto-assigned to them, usable at once, queued offline. */
 /** A teacher (or the owner) adds a student to a class roster: usable at once for marks, synced (queued offline). Roll is unique per class. */
+/** mobile number: digits, + - and spaces only (max 20); '' when empty */
+function cleanPhone(v) { const p = String(v || '').trim(); if (p && !/^[0-9+\- ]{7,20}$/.test(p)) throw new Error('Mobile number: digits only, e.g. 03001234567'); return p; }
 function addRosterStudent(f) {
   const m = me(); if (!m || !approved(m)) throw new Error('Only approved teachers can add students');
-  const roll = String(f.roll || '').trim(), first = String(f.first || '').trim(), last = String(f.last || '').trim(), father = String(f.father || '').trim(), cls = f.cls;
+  const roll = String(f.roll || '').trim(), first = String(f.first || '').trim(), last = String(f.last || '').trim(), father = String(f.father || '').trim(), cls = f.cls, phone = cleanPhone(f.phone);
   if (!roll || !first || !last || !father || !cls) throw new Error('Roll, first name, last name, father\'s name and class are required');
   if (!/^[A-Za-z0-9-]{1,10}$/.test(roll)) throw new Error('Roll number: letters/numbers only');
   if (!myClasses().includes(cls)) throw new Error('You can only add students to your own classes');
   const list = db.students[cls] = db.students[cls] || [];
   if (list.some(x => x.roll === roll) || db.users.some(u => u.role === 'student' && u.cls === cls && u.roll === roll && u.status !== 'rejected'))
     throw new Error(`Roll ${roll} already exists in ${cls}`);
-  list.push({roll, first, last, father, name: `${first} ${last}`, addedBy: m.role === 'owner' ? 'admin' : m.name, isNew: true});
+  list.push({roll, first, last, father, phone, name: `${first} ${last}`, addedBy: m.role === 'owner' ? 'admin' : m.name, isNew: true});
   db.settings.rosterDirty = true; save(); syncNow(false).catch(() => {});
   return {roll, cls};
 }
@@ -292,6 +303,16 @@ function applyServerSettings(s) {
   applySubjectLists(s.subjects_json, s.subject_meta_json);
   if (s.report_key) db.settings.reportKey = s.report_key;
   try { if (s.contact_json) db.settings.contact = {...DEFAULT_CONTACT, ...JSON.parse(s.contact_json)}; } catch (e) {}
+}
+/** server timetables (v11 script) → local; local unsaved edits win. Old script: no list → keep local only. */
+function mergeTimetables(list) {
+  if (!Array.isArray(list)) { db.settings.ttServer = 'old'; return; }
+  db.settings.ttServer = 'yes'; const ids = new Set(list.map(x => x.tt_id));
+  db.timetables = db.timetables.filter(t => t.dirty || ids.has(t.id));
+  list.forEach(x => { if (db.deletedTT.includes(x.tt_id)) return; const ex = db.timetables.find(t => t.id === x.tt_id); if (ex && ex.dirty) return;
+    let d; try { d = JSON.parse(x.data_json); } catch (e) { return; }
+    const t = {...d, id: x.tt_id, name: x.name, updatedAt: x.updated_at || d.updatedAt, by: x.updated_by || d.by, synced: true, dirty: false};
+    if (ex) Object.assign(ex, t); else db.timetables.push(t); });
 }
 function mergeAnn(list, onlyPublic) {
   const ids = new Set(list.map(a => a.ann_id));
@@ -524,7 +545,7 @@ function classAvg(tests) { let o = 0, t = 0; tests.forEach(x => x.rows.forEach(r
 let VIEW = 'home'; const STATE = {};
 const hashView = () => decodeURIComponent(location.hash.replace(/^#\/?/, '')).replace(/\/$/, '');
 function go(v, extra) { VIEW = v; if (extra) Object.assign(STATE, extra); if (hashView() !== v) history.replaceState(null, '', '#/' + v); render(); window.scrollTo(0, 0); }
-const STUDENT_VIEWS = ['shome', 'notes', 'mine', 'card', 'honor', 'chat', 'ann', 'account'];
+const STUDENT_VIEWS = ['shome', 'notes', 'mine', 'card', 'honor', 'chat', 'ann', 'account', 'timetable'];
 const PUBLIC_VIEWS = ['home', 'teacher', 'teacher/register', 'student', 'student/register', 'admin', 'pending'];
 function render() {
   if (dashMod) dashMod.destroyCharts(); if (chatMod) chatMod.stopChat(); updateStatus(); applyBranding();
@@ -554,6 +575,7 @@ function render() {
   if (VIEW === 'notes') return lazyView('notes', 'viewNotes');
   if (VIEW === 'chat') return lazyView('chat', 'viewChat');
   if (VIEW === 'ann') return lazyView('ann', 'viewAnn');
+  if (VIEW === 'timetable') return lazyView('timetable', 'viewTimetable');
   const lazy = {shome: 'viewStudentHome', report: 'viewReport', card: 'viewCard', sdash: 'viewStudentDash', mine: 'viewStudentDash', tdash: 'viewTeacherDash', mystudents: 'viewMyStudents', admin: 'viewAdmin', honor: 'viewHonor'}[VIEW];
   if (!lazy) { VIEW = 'home'; return viewHome(); }
   lazyView('dash', lazy);
@@ -663,6 +685,7 @@ function viewRoleLogin(role, register) {
       <label>Roll Number <span class="ur">رول نمبر</span> *</label><input id="suRoll" inputmode="numeric" required>
       <div class="row"><div><label>First Name <span class="ur">پہلا نام</span> *</label><input id="suFirst" autocomplete="given-name" required></div><div><label>Last Name <span class="ur">آخری نام</span> *</label><input id="suLast" autocomplete="family-name" required></div></div>
       <label>Father's Name <span class="ur">والد کا نام</span> *</label><input id="suFather" required>
+      <label>Mobile Number <span class="ur">موبائل نمبر</span> <small class="muted">(optional)</small></label><input id="suPhone" type="tel" inputmode="tel" autocomplete="tel" placeholder="03001234567" maxlength="20">
       <label>Class &amp; section <span class="ur">کلاس</span> *</label><select id="suCls">${opts(cls)}</select>
       <label>Username (unique, no spaces) <span class="ur">یوزر نیم</span> *</label><input id="suUser" autocomplete="username" autocapitalize="none">
       <label>Password (6+) <span class="ur">پاس ورڈ</span> *</label><input id="suPass" type="password" autocomplete="new-password">
@@ -692,7 +715,7 @@ function viewRoleLogin(role, register) {
     <p class="muted auth-foot">🔒 Passwords are salted &amp; hashed – never stored or sent in plain text.</p></div></div>`;
   const busy = async (btn, fn) => { btn.disabled = true; try { await fn(); } catch (e) { toast(e.message.replace(/^choose_class:\s*/, '')); } finally { btn.disabled = false; } };
   if (register && role === 'student') $('#doStu').onclick = e => busy(e.target, async () => {
-    const f = {role: 'student', roll: $('#suRoll').value.trim(), first: $('#suFirst').value.trim(), last: $('#suLast').value.trim(), father: $('#suFather').value.trim(), cls: $('#suCls').value,
+    const f = {role: 'student', roll: $('#suRoll').value.trim(), first: $('#suFirst').value.trim(), last: $('#suLast').value.trim(), father: $('#suFather').value.trim(), cls: $('#suCls').value, phone: cleanPhone($('#suPhone').value),
       username: $('#suUser').value, pass: $('#suPass').value, secQ: $('#secS').value, secA: $('#secAS').value, email: $('#suEmail').value};
     if (!f.roll || !f.first || !f.last || !f.father || !f.cls || !f.username.trim()) throw new Error('All fields with * are required');
     if (f.pass.length < 6) throw new Error('Password: at least 6 characters');
@@ -801,8 +824,8 @@ function viewHome() {
     <div class="muted">Subjects: ${esc((m.subjects || []).join(', ') || 'all')} · Classes: ${esc((m.classes || []).join(', ') || 'all')}</div>
     <button class="btn sec sm" onclick="syncNow(true)">⟳ Sync now</button>
   </div>
-  ${tilesHTML([['entry', '➕', 'Enter Marks', 'Record today\'s test'], ['mystudents', '👥', 'My Students', 'Class list & search'], ['tdash', '🏫', 'My Classes', 'Insights & my subjects'], ['report', '🗓️', 'Reports', 'Weekly / monthly'],
-    ['notes', '📚', 'Notes', 'Share with classes'], ['chat', '💬', 'Chat', 'Class chat'], ['ann', '📢', 'Announcements', 'School news']].concat(m.role === 'owner' ? [['admin', '🛡️', 'Admin Panel', 'Approve & manage']] : []), 'tTiles')}
+  ${tilesHTML([['entry', '➕', 'Enter Marks', 'Record today\'s test'], ['mystudents', '👥', 'Class Students', 'Names, father, mobile'], ['tdash', '🏫', 'My Classes', 'Insights & my subjects'], ['report', '🗓️', 'Reports', 'Weekly / monthly'],
+    ['notes', '📚', 'Notes', 'Share with classes'], ['chat', '💬', 'Chat', 'Class chat'], ['ann', '📢', 'Announcements', 'School news'], ['timetable', '🕒', 'Timetable', m.role === 'owner' ? 'Create & edit' : 'My periods']].concat(m.role === 'owner' ? [['admin', '🛡️', 'Admin Panel', 'Approve & manage']] : []), 'tTiles')}
   <div class="kpis">
     <div class="kpi"><div class="l">Tests entered by you</div><div class="v">${mine.length}</div></div>
     <div class="kpi"><div class="l">This week (all)</div><div class="v">${testsIn({from: wf, to: wt}).length}</div><div class="s">${fmtD(wf)} – ${fmtD(wt)}</div></div>

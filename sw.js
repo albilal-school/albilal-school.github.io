@@ -1,7 +1,7 @@
 // Al-Bilal service worker: caches the app shell so it works fully offline.
-const CACHE = 'albilal-v10';
+const CACHE = 'albilal-v11';
 const ASSETS = [
-  './', './index.html', './styles.css', './app.js', './dash.js', './notes.js', './chat.js', './ann.js', './qr_app_url.png', './manifest.webmanifest', './vendor/chart.umd.js',
+  './', './index.html', './styles.css', './app.js', './dash.js', './notes.js', './chat.js', './ann.js', './timetable.js', './qr_app_url.png', './manifest.webmanifest', './vendor/chart.umd.js',
   './icons/icon-192.png', './icons/icon-512.png',
   './icons/icon-192-maskable.png', './icons/icon-512-maskable.png'
 ];
