@@ -176,7 +176,7 @@ async function syncNow(manual) {
     const u = sessionUser(); if (!u) return;
     // 2) owner approvals
     for (const q of db.approvalQueue.slice()) { const r = await postJSON(url, {action: 'approve', username: q.username, status: q.status}); if (r.ok || !r.auth) db.approvalQueue.shift(); if (!r.ok) toast(r.error); }
-    if (u.profileDirty) { const r = await postJSON(url, {action: 'profile', name: u.name, phone: u.phone || '', email: u.email || '', subjects: (u.subjects || []).join('; '), classes: (u.classes || []).join('; ')}); if (r.ok) u.profileDirty = false; }
+    if (u.profileDirty) { const r = await postJSON(url, {action: 'profile', name: u.name, phone: u.phone || '', email: u.email || '', photo: u.role === 'student' ? undefined : (u.photo || ''), subjects: (u.subjects || []).join('; '), classes: (u.classes || []).join('; ')}); if (r.ok) u.profileDirty = false; }
     // 3a) subjects a teacher added (queued while offline) – before the marks that use them
     if (u.role !== 'student') for (const nm of db.pendingSubjects.slice()) {
       const r = await postJSON(url, {action: 'add_subject', name: nm, base: db.subjects});
@@ -198,7 +198,7 @@ async function syncNow(manual) {
       if (!res || res.ok === false) throw new Error(res && res.error || 'Script error');
       if (res.forbidden && res.forbidden.length) toast(`⛔ Not allowed for ${res.forbidden.length} test(s) – not your class. Restored from the school copy.`);
       pend.forEach(t => t.synced = true); db.deleted = db.deleted.filter(id => !body.deleted.includes(id)); db.deletedNotes = db.deletedNotes.filter(id => !body.deleted_notes.includes(id));
-      if (body.settings) { db.settings.settingsDirty = false; db.settings.subjectRenames = {}; } if (body.students) { db.settings.rosterDirty = false; Object.values(db.students).forEach(l => l.forEach(x => { delete x.isNew; delete x.dirty; })); if (res.forbidden_students) toast('Not your class – not saved: ' + res.forbidden_students.join(', ')); } if (body.deleted_students) db.deletedStudents = db.deletedStudents.filter(x => !delS.includes(x)); save();
+      if (body.settings) { db.settings.settingsDirty = false; db.settings.subjectRenames = {}; } if (body.students) { db.settings.rosterDirty = false; Object.values(db.students).forEach(l => l.forEach(x => { delete x.isNew; delete x.dirty; })); if (res.forbidden_students) toast('Not your class – not saved: ' + res.forbidden_students.join(', ')); if (res.duplicate_students) toast('⛔ Roll number already taken – not added: ' + res.duplicate_students.join(', ')); } if (body.deleted_students) db.deletedStudents = db.deletedStudents.filter(x => !delS.includes(x)); save();
       if (db.notes.some(n => !n.synced)) await (await loadMod('notes')).uploadPendingNotes(url);
     }
     if (u.role === 'owner' && db.settings.ttServer !== 'old') { // 3b) timetables (owner) – needs the v11 Apps Script
@@ -244,10 +244,32 @@ async function pullNow(manual) {
     if (manual) { toast('Downloaded latest data ✓'); render(); }
   } catch (e) { console.warn('pull failed', e); if (manual) toast('Download failed: ' + e.message); }
 }
+/* v12: profile pictures – resized on the phone to a ~200px square JPEG (< 30 KB) and kept as a data URL in the Users sheet */
+const initials = u => String((u && (u.name || u.username)) || '?').trim().split(/\s+/).map(x => x[0]).slice(0, 2).join('').toUpperCase();
+const okPhoto = p => /^data:image\/jpeg;base64,/.test(p || '');
+function avatarHTML(u, size = 40) { return okPhoto(u && u.photo) ? `<img class="avatar" src="${esc(u.photo)}" alt="" width="${size}" height="${size}" style="width:${size}px;height:${size}px">`
+  : `<span class="avatar ini" style="width:${size}px;height:${size}px;font-size:${Math.round(size * .4)}px">${esc(initials(u))}</span>`; }
+async function resizePhoto(file) {
+  if (!file || !/^image\//.test(file.type || 'image/')) throw new Error('Choose a picture (JPG/PNG)');
+  const url = URL.createObjectURL(file);
+  try { const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('Could not read this picture')); i.src = url; });
+    const S = 200, c = document.createElement('canvas'); c.width = c.height = S; const x = c.getContext('2d'); const m = Math.min(img.naturalWidth, img.naturalHeight);
+    x.fillStyle = '#fff'; x.fillRect(0, 0, S, S); x.drawImage(img, (img.naturalWidth - m) / 2, (img.naturalHeight - m) / 2, m, m, 0, 0, S, S);
+    for (let q = .82; q >= .3; q -= .08) { const d = c.toDataURL('image/jpeg', q); if (d.length * .75 < 30000) return d; }
+    return c.toDataURL('image/jpeg', .25);
+  } finally { URL.revokeObjectURL(url); }
+}
+function photoPickerHTML(id, cur) { return `<div class="ppick"><span id="${id}Prev">${avatarHTML({photo: cur, name: '?'}, 64)}</span><div><label class="btn sec sm" style="display:inline-flex">📷 ${cur ? 'Change picture' : 'Add picture'}<input type="file" id="${id}" accept="image/*" hidden></label>
+  <button type="button" class="btn sec sm ${cur ? '' : 'hidden'}" id="${id}X">Remove</button><small class="muted" style="display:block">Camera or gallery · made small automatically</small></div></div>`; }
+function bindPhotoPicker(id, get, set) {
+  const show = () => { $('#' + id + 'Prev').innerHTML = avatarHTML({photo: get(), name: '?'}, 64); $('#' + id + 'X').classList.toggle('hidden', !get()); };
+  $('#' + id).onchange = async e => { const f = e.target.files[0]; if (!f) return; try { set(await resizePhoto(f)); show(); } catch (err) { toast(err.message); } e.target.value = ''; };
+  $('#' + id + 'X').onclick = () => { set(''); show(); };
+}
 function userFromServer(s, ex) {
   const sp = v => String(v || '').split(';').map(x => x.trim()).filter(Boolean);
   return {username: s.username, name: s.name, role: s.role, status: s.status, phone: s.phone || '', subjects: sp(s.subjects), classes: sp(s.classes),
-    cls: s.class ? `${s.class} ${s.section}` : (ex.cls || ''), roll: s.roll_no || ex.roll || '', first: s.first_name || ex.first || '', last: s.last_name || ex.last || '', father: s.father_name || ex.father || '', email: s.email !== undefined ? s.email : (ex.email || ''), createdAt: s.created_at || ex.createdAt || '', lastSeen: s.last_seen || ex.lastSeen || ''};
+    cls: s.class ? `${s.class} ${s.section}` : (ex.cls || ''), roll: s.roll_no || ex.roll || '', first: s.first_name || ex.first || '', last: s.last_name || ex.last || '', father: s.father_name || ex.father || '', email: s.email !== undefined ? s.email : (ex.email || ''), photo: s.photo !== undefined ? s.photo : (ex.photo || ''), createdAt: s.created_at || ex.createdAt || '', lastSeen: s.last_seen || ex.lastSeen || ''};
 }
 function applySubjectLists(sj, mj) { // server list + anything still queued on this phone
   try { if (sj) { const list = JSON.parse(sj); if (Array.isArray(list) && list.length) db.subjects = list; } } catch (e) {}
@@ -263,7 +285,7 @@ function renameSubjectLocal(from, to) {
 /** An approved teacher (or the owner) adds a new subject: shared list, auto-assigned to them, usable at once, queued offline. */
 /** A teacher (or the owner) adds a student to a class roster: usable at once for marks, synced (queued offline). Roll is unique per class. */
 /** mobile number: digits, + - and spaces only (max 20); '' when empty */
-function cleanPhone(v) { const p = String(v || '').trim(); if (p && !/^[0-9+\- ]{7,20}$/.test(p)) throw new Error('Mobile number: digits only, e.g. 03001234567'); return p; }
+function cleanPhone(v) { const p = String(v || '').trim(); if (p && !/^[0-9+\- ]{7,20}$/.test(p)) throw new Error('Contact number: digits only, e.g. 03001234567'); return p; }
 function addRosterStudent(f) {
   const m = me(); if (!m || !approved(m)) throw new Error('Only approved teachers can add students');
   const roll = String(f.roll || '').trim(), first = String(f.first || '').trim(), last = String(f.last || '').trim(), father = String(f.father || '').trim(), cls = f.cls, phone = cleanPhone(f.phone);
@@ -404,7 +426,7 @@ async function ownerSetup(name, username, pass, secQ, secA, email) {
 function regPayload(u) {
   const c = u.cls ? splitCk(u.cls) : {grade: '', section: ''};
   return {action: 'register', username: u.username, name: u.name, role: u.role, salt: u.salt, hash: u.hash, phone: u.phone || '', class: c.grade, section: c.section, roll_no: u.roll || '',
-    first_name: u.first || '', last_name: u.last || '', father_name: u.father || '', sec_q: u.secQ, sec_a: u.secA, email: u.email || ''};
+    first_name: u.first || '', last_name: u.last || '', father_name: u.father || '', sec_q: u.secQ, sec_a: u.secA, email: u.email || '', photo: u.photo || ''};
 }
 async function signUp(f) {
   const username = f.username.trim().toLowerCase();
@@ -414,11 +436,13 @@ async function signUp(f) {
   if (f.role === 'student') {
     if (!f.roll || !f.first || !f.last || !f.father || !f.cls) throw new Error('All fields are required');
     if (db.users.some(x => x.role === 'student' && x.status !== 'rejected' && x.cls === f.cls && String(x.roll) === String(f.roll))) throw new Error(`Roll number ${f.roll} is already registered in ${f.cls}`);
+    const lc = v => String(v || '').trim().toLowerCase(), ex = (db.students[f.cls] || []).find(x => x.roll === String(f.roll)); // v12: teacher already added this roll – same child links, another child is blocked
+    if (ex && ((ex.first && lc(ex.first) !== lc(f.first)) || (ex.father && lc(ex.father) !== lc(f.father)))) throw new Error(`Roll number ${f.roll} in ${f.cls} belongs to another student. Check your roll number or ask your teacher.`);
   }
   const email = cleanEmail(f.email, false);
   const salt = newSalt(), hash = hashPw(f.pass, salt);
   const u = {id: uid(), email, name: f.role === 'student' ? fullName(f) : f.name, username, role: f.role, status: 'pending', salt, hash, phone: f.phone || '', cls: f.cls || '', roll: f.roll || '',
-    first: f.first || '', last: f.last || '', father: f.father || '', secQ: f.secQ, secA: ansHash(f.secA), subjects: [], classes: [], created: new Date().toISOString()};
+    first: f.first || '', last: f.last || '', father: f.father || '', photo: f.photo || '', secQ: f.secQ, secA: ansHash(f.secA), subjects: [], classes: [], created: new Date().toISOString()};
   if (online()) { const r = await postJSON(db.settings.scriptUrl, regPayload(u)); if (!r.ok) throw new Error(r.error); }
   else if (db.settings.scriptUrl) u.regQueued = true;
   db.users = db.users.filter(x => x.username !== username); db.users.push(u); localStorage.setItem(SES_KEY, u.id); save(); return u;
@@ -505,7 +529,7 @@ function renderUserMenu() {
   const u = sessionUser(), ok = approved(u), w = $('#umenuWrap'); if (!w) return;
   w.classList.toggle('hidden', !u); const ho = $('#hdrLogout'); if (ho) ho.classList.toggle('hidden', !u); if (!u) return; { const t = whoText(u), i = t.indexOf(', '); $('#whoami').innerHTML = i < 0 ? esc(t) : `<span class="wn">${esc(t.slice(0, i))}</span><span class="wsep">, </span><span class="wd">${esc(t.slice(i + 2))}</span>`; }
   const role = u.role === 'owner' ? 'Admin' : u.role === 'student' ? 'Student' : 'Teacher';
-  $('#uAv').textContent = (u.name || u.username || '?').trim().split(/\s+/).map(x => x[0]).slice(0, 2).join('').toUpperCase();
+  if (okPhoto(u.photo)) $('#uAv').innerHTML = `<img src="${esc(u.photo)}" alt="">`; else $('#uAv').textContent = initials(u);
   $('#uRole').textContent = role; $('#uRole').className = 'rbadge r-' + u.role;
   $('#userMenu').innerHTML = `<div class="um-h"><b>${esc(u.name || u.username)}</b><span class="rbadge r-${esc(u.role)}">${role}</span><small>@${esc(u.username)}${u.role === 'student' ? ` · ${esc(u.cls)} #${esc(u.roll)}` : ''}</small></div>
     ${ok ? `<button data-um="profile">👤 Profile</button><button data-um="password">🔑 Change password</button>` : ''}
@@ -576,7 +600,7 @@ function render() {
   if (VIEW === 'chat') return lazyView('chat', 'viewChat');
   if (VIEW === 'ann') return lazyView('ann', 'viewAnn');
   if (VIEW === 'timetable') return lazyView('timetable', 'viewTimetable');
-  const lazy = {shome: 'viewStudentHome', report: 'viewReport', card: 'viewCard', sdash: 'viewStudentDash', mine: 'viewStudentDash', tdash: 'viewTeacherDash', mystudents: 'viewMyStudents', admin: 'viewAdmin', honor: 'viewHonor'}[VIEW];
+  const lazy = {shome: 'viewStudentHome', report: 'viewReport', card: 'viewCard', sdash: 'viewStudentDash', mine: 'viewStudentDash', tdash: 'viewTeacherDash', mystudents: 'viewMyStudents', cresult: 'viewClassResult', admin: 'viewAdmin', honor: 'viewHonor'}[VIEW];
   if (!lazy) { VIEW = 'home'; return viewHome(); }
   lazyView('dash', lazy);
 }
@@ -681,11 +705,11 @@ function viewRoleLogin(role, register) {
   const side = `<div class="auth-side"><div class="auth-ic">${c.icon}</div><h1>${register ? (role === 'teacher' ? 'Teacher Registration' : 'Student Registration') : c.title}</h1><div class="ur">${c.ur}</div>
     <p>${esc(c.text)}</p><ul>${c.bullets.map(b => `<li>${b}</li>`).join('')}</ul><a class="auth-home" href="#/home">← ${esc(db.settings.schoolName || DEFAULT_NAME)} home</a></div>`;
   let form;
-  if (register && role === 'student') form = `<h2>Create student account</h2><p class="muted">All fields with * are required. The admin approves your account.</p>
+  if (register && role === 'student') form = `<h2>Create student account</h2><p class="muted">All fields with * are required. The admin approves your account. If your teacher already added you, use the <b>same class, roll number and name</b> – your account links to that record (no duplicate).</p>
       <label>Roll Number <span class="ur">رول نمبر</span> *</label><input id="suRoll" inputmode="numeric" required>
       <div class="row"><div><label>First Name <span class="ur">پہلا نام</span> *</label><input id="suFirst" autocomplete="given-name" required></div><div><label>Last Name <span class="ur">آخری نام</span> *</label><input id="suLast" autocomplete="family-name" required></div></div>
       <label>Father's Name <span class="ur">والد کا نام</span> *</label><input id="suFather" required>
-      <label>Mobile Number <span class="ur">موبائل نمبر</span> <small class="muted">(optional)</small></label><input id="suPhone" type="tel" inputmode="tel" autocomplete="tel" placeholder="03001234567" maxlength="20">
+      <label>Contact Number (mobile) <span class="ur">رابطہ نمبر</span> <small class="muted">(optional)</small></label><input id="suPhone" type="tel" inputmode="tel" autocomplete="tel" placeholder="03001234567" maxlength="20">
       <label>Class &amp; section <span class="ur">کلاس</span> *</label><select id="suCls">${opts(cls)}</select>
       <label>Username (unique, no spaces) <span class="ur">یوزر نیم</span> *</label><input id="suUser" autocomplete="username" autocapitalize="none">
       <label>Password (6+) <span class="ur">پاس ورڈ</span> *</label><input id="suPass" type="password" autocomplete="new-password">
@@ -694,6 +718,7 @@ function viewRoleLogin(role, register) {
       <button class="btn big" id="doStu">Register as student</button>
       <p class="auth-switch">Already registered? <a href="#/student" id="toLogin">Log in here</a></p>`;
   else if (register) form = `<h2>Create teacher account</h2><p class="muted">The admin approves new teachers. <span class="ur">مالک منظوری دیں گے</span></p>
+      <label>Profile picture <span class="ur">تصویر</span> <small class="muted">(optional)</small></label>${photoPickerHTML('rPhoto', STATE.regPhoto || '')}
       <label>Full name <span class="ur">پورا نام</span> *</label><input id="rName" autocomplete="name">
       <label>Username <span class="ur">یوزر نیم</span> *</label><input id="rUser" autocomplete="username" autocapitalize="none" placeholder="e.g. ahmad or 03001234567">
       <label>Phone (optional) <span class="ur">فون نمبر</span></label><input id="rPhone" inputmode="tel">
@@ -714,6 +739,7 @@ function viewRoleLogin(role, register) {
   app().innerHTML = `<div class="auth-wrap auth-${role}">${side}<div class="card auth-card">${form}
     <p class="muted auth-foot">🔒 Passwords are salted &amp; hashed – never stored or sent in plain text.</p></div></div>`;
   const busy = async (btn, fn) => { btn.disabled = true; try { await fn(); } catch (e) { toast(e.message.replace(/^choose_class:\s*/, '')); } finally { btn.disabled = false; } };
+  if (register && role !== 'student' && $('#rPhoto')) bindPhotoPicker('rPhoto', () => STATE.regPhoto || '', v => STATE.regPhoto = v);
   if (register && role === 'student') $('#doStu').onclick = e => busy(e.target, async () => {
     const f = {role: 'student', roll: $('#suRoll').value.trim(), first: $('#suFirst').value.trim(), last: $('#suLast').value.trim(), father: $('#suFather').value.trim(), cls: $('#suCls').value, phone: cleanPhone($('#suPhone').value),
       username: $('#suUser').value, pass: $('#suPass').value, secQ: $('#secS').value, secA: $('#secAS').value, email: $('#suEmail').value};
@@ -722,9 +748,9 @@ function viewRoleLogin(role, register) {
     await signUp(f); go('pending');
   });
   else if (register) $('#doReg').onclick = e => busy(e.target, async () => {
-    const f = {role: 'teacher', name: $('#rName').value.trim(), username: $('#rUser').value, pass: $('#rPass').value, phone: $('#rPhone').value.trim(), secQ: $('#secT').value, secA: $('#secAT').value, email: $('#rEmail').value};
+    const f = {role: 'teacher', photo: STATE.regPhoto || '', name: $('#rName').value.trim(), username: $('#rUser').value, pass: $('#rPass').value, phone: $('#rPhone').value.trim(), secQ: $('#secT').value, secA: $('#secAT').value, email: $('#rEmail').value};
     if (!f.name || !f.username.trim() || f.pass.length < 6) throw new Error('Enter name, username and a password (6+ chars)');
-    await signUp(f); go('pending');
+    await signUp(f); STATE.regPhoto = ''; go('pending');
   });
   else $('#doLogin').onclick = e => busy(e.target, async () => {
     try { const u = await login($('#lUser').value, $('#lPass').value, $('#lCls').value); STATE.needCls = false;
@@ -824,7 +850,7 @@ function viewHome() {
     <div class="muted">Subjects: ${esc((m.subjects || []).join(', ') || 'all')} · Classes: ${esc((m.classes || []).join(', ') || 'all')}</div>
     <button class="btn sec sm" onclick="syncNow(true)">⟳ Sync now</button>
   </div>
-  ${tilesHTML([['entry', '➕', 'Enter Marks', 'Record today\'s test'], ['mystudents', '👥', 'Class Students', 'Names, father, mobile'], ['tdash', '🏫', 'My Classes', 'Insights & my subjects'], ['report', '🗓️', 'Reports', 'Weekly / monthly'],
+  ${tilesHTML([['entry', '➕', 'Enter Marks', 'Record today\'s test'], ['mystudents', '👥', 'Class Students', 'Add, edit, contact no'], ['cresult', '📊', 'Class Result', 'Whole class, all subjects'], ['tdash', '🏫', 'My Classes', 'Insights & my subjects'], ['report', '🗓️', 'Reports', 'Weekly / monthly'],
     ['notes', '📚', 'Notes', 'Share with classes'], ['chat', '💬', 'Chat', 'Class chat'], ['ann', '📢', 'Announcements', 'School news'], ['timetable', '🕒', 'Timetable', m.role === 'owner' ? 'Create & edit' : 'My periods']].concat(m.role === 'owner' ? [['admin', '🛡️', 'Admin Panel', 'Approve & manage']] : []), 'tTiles')}
   <div class="kpis">
     <div class="kpi"><div class="l">Tests entered by you</div><div class="v">${mine.length}</div></div>
@@ -839,88 +865,104 @@ function viewHome() {
 }
 
 /* ------------------------------------------------------------------ test entry */
+/** v12: every student of a class = roster (teacher-added + approved registrations) ∪ approved student accounts not yet in the roster; one row per roll */
+function classRoster(cls) {
+  const out = (db.students[cls] || []).map(s => ({roll: String(s.roll), name: fullName(s), father: s.father || ''}));
+  db.users.filter(u => u.role === 'student' && u.cls === cls && u.status === 'approved' && u.roll && !out.some(x => x.roll === String(u.roll)))
+    .forEach(u => out.push({roll: String(u.roll), name: fullName(u) || u.name, father: u.father || ''}));
+  return out.sort((a, b) => (parseFloat(a.roll) || 0) - (parseFloat(b.roll) || 0) || a.roll.localeCompare(b.roll));
+}
+/** the one test for date + class + subject (marks are never duplicated – a second entry edits this one) */
+function findTest(date, cls, subject, exceptId) { return db.tests.find(t => t.id !== exceptId && t.date === date && testCk(t) === cls && String(t.subject).toLowerCase() === String(subject).toLowerCase()); }
 function viewEntry() {
-  const edit = STATE.editId ? db.tests.find(t => t.id === STATE.editId) : null;
-  const classes = edit ? [...new Set([...myClasses(), testCk(edit)])] : myClasses();
-  const cls = edit ? testCk(edit) : (STATE.entryCls && classes.includes(STATE.entryCls) ? STATE.entryCls : classes[0]);
-  const subsFor = c => { const l = subjectsForClass(c, mySubjects()); return edit && c === testCk(edit) && !l.includes(edit.subject) ? [...l, edit.subject] : l; };
-  const subjects = subsFor(cls);
-  app().innerHTML = `<div class="card"><div class="card-h"><h2>${edit ? 'Edit test' : 'Daily test entry'} <span class="ur">روزانہ ٹیسٹ اندراج</span></h2></div>
-    <div class="row">
-      <div><label>1 · Class <span class="ur">کلاس</span></label><select id="eCls">${opts(classes, cls)}</select></div>
-      <div><label>2 · Subject <span class="ur">مضمون</span></label><select id="eSub">${opts(subjects, edit ? edit.subject : STATE.entrySub)}<option value="__add">➕ Add subject…</option></select>
+  const fixed = STATE.editId ? db.tests.find(t => t.id === STATE.editId) : null; if (STATE.editId && !fixed) STATE.editId = null;
+  const classesAll = fixed ? [...new Set([...myClasses(), testCk(fixed)])] : myClasses();
+  const subjAll = [...new Set(classesAll.flatMap(c => subjectsForClass(c, mySubjects())).concat(fixed ? [fixed.subject] : []))];
+  if (!classesAll.length) { app().innerHTML = '<div class="card"><h2>Enter marks</h2><p class="muted">No classes are assigned to you yet – the admin assigns classes.</p></div>'; return; }
+  const sub0 = fixed ? fixed.subject : (subjAll.includes(STATE.entrySub) ? STATE.entrySub : subjAll[0]);
+  const clsFor = sb => { const l = classesAll.filter(c => subjectsForClass(c, mySubjects()).includes(sb)); return l.length ? l : classesAll; };
+  const cls0 = fixed ? testCk(fixed) : (clsFor(sub0).includes(STATE.entryCls) ? STATE.entryCls : clsFor(sub0)[0]);
+  app().innerHTML = `<div class="card"><div class="card-h"><h2>${fixed ? '✏️ Edit marks' : 'Enter marks'} <span class="ur">نمبر درج کریں</span></h2>${fixed ? '<button class="btn sm sec" id="cancelEdit">Cancel</button>' : ''}</div>
+    <div class="ent-top">
+      <div><label>1 · Subject <span class="ur">مضمون</span></label><select id="eSub" ${fixed ? 'disabled' : ''}>${opts(subjAll, sub0)}${fixed ? '' : '<option value="__add">➕ Add subject…</option>'}</select>
         <div id="eSubAdd" class="addsub hidden"><input id="eSubNew" placeholder="New subject, e.g. Computer Science" maxlength="40"><button class="btn sm" id="eSubSave">Add</button><button class="btn sm sec" id="eSubX">✕</button></div></div>
-      <div><label>3 · Test date <span class="ur">تاریخ</span></label><input type="date" id="eDate" value="${edit ? edit.date : (STATE.entryDate || today())}"></div>
-      <div><label>4 · Total marks <span class="ur">کل نمبر</span></label><input type="number" id="eTotal" min="1" inputmode="numeric" value="${edit ? edit.total : (STATE.entryTotal || '')}" placeholder="e.g. 25"></div>
-    </div></div>
-  <div class="card"><div class="card-h"><h3>Students <span class="ur">طلبہ</span></h3><span class="muted">Tick <b>Leave</b> (or leave marks empty) for a student on leave · <span class="ur">چھٹی</span></span></div>
+      <div><label>2 · Total marks <span class="ur">کل نمبر</span></label><input type="number" id="eTotal" min="1" inputmode="numeric" value="${fixed ? fixed.total : (STATE.entryTotal || '')}" placeholder="e.g. 25"></div>
+      <div><label>3 · Class <span class="ur">کلاس</span></label><select id="eCls" ${fixed ? 'disabled' : ''}>${opts(clsFor(sub0), cls0)}</select></div>
+      <div class="ent-date"><label>Date <small class="muted">(optional)</small></label><input type="date" id="eDate" value="${fixed ? fixed.date : (STATE.entryDate || today())}" ${fixed ? 'disabled' : ''}></div>
+    </div><div id="eExist"></div></div>
+  <div class="card"><div class="card-h"><h3>4 · Students <span class="ur">طلبہ</span> <span class="badge" id="eCount"></span></h3><span class="muted">Empty or <b>L</b> = leave · <span class="ur">چھٹی</span></span></div>
     <input id="eQ" type="search" placeholder="🔍 Find a student by name or roll" class="esearch">
-    <div class="tbl-wrap"><table id="eTbl"><thead><tr><th style="width:90px">Roll # <span class="ur">رول</span></th><th>Name <span class="ur">نام</span></th><th style="width:110px">Obtained <span class="ur">حاصل</span></th><th style="width:76px">Leave <span class="ur">چھٹی</span></th><th class="num" style="width:70px">%</th><th style="width:40px"></th></tr></thead><tbody></tbody></table></div>
-    <button class="btn sec sm" id="addRow">+ Add student</button><button class="btn sec sm" id="toMyStu" onclick="go('mystudents', {myStuCls: document.getElementById('eCls').value, scrollTo: 'msForm'})">🎓 Add student to class list</button>
+    <div id="eList" class="ent-list"></div>
     <div id="eSummary" class="muted" style="margin-top:10px"></div>
-    <div style="margin-top:8px"><button class="btn big" id="saveTest">${edit ? '💾 Save changes' : '✅ Submit marks'}</button>${edit ? '<button class="btn sec" id="cancelEdit">Cancel</button>' : ''}</div>
-  </div>`;
-  const tbody = $('#eTbl tbody');
-  const addRow = (r = {}) => { const tr = document.createElement('tr');
-    tr.innerHTML = `<td><input class="eRoll" value="${esc(r.roll)}" inputmode="numeric" placeholder="Roll" aria-label="Roll number"></td><td><input class="eName" value="${esc(r.name)}" placeholder="Student name" aria-label="Name"></td>
-      <td><input class="eObt" value="${r.obt == null ? '' : r.obt}" inputmode="decimal" placeholder="Marks" aria-label="Obtained marks" ${r.leave ? 'disabled' : ''}></td><td><label class="leave"><input type="checkbox" class="eLeave" ${r.leave ? 'checked' : ''}><span>Leave</span></label></td><td class="num ePct"></td><td><button class="btn red sm eDel" title="Remove">✕</button></td>`;
-    tbody.appendChild(tr); $('.eDel', tr).onclick = () => { tr.remove(); recalc(); }; $$('input', tr).forEach(i => i.oninput = recalc);
-    $('.eLeave', tr).onchange = e => { const o = $('.eObt', tr); o.disabled = e.target.checked; if (e.target.checked) o.value = ''; tr.classList.toggle('onleave', e.target.checked); recalc(); }; tr.classList.toggle('onleave', !!r.leave); };
-  const loadRoster = () => { tbody.innerHTML = ''; const roster = db.students[$('#eCls').value] || [];
-    if (edit && $('#eCls').value === testCk(edit)) { edit.rows.forEach(r => addRow({...r, leave: r.obt == null})); roster.filter(s => !edit.rows.some(r => r.roll === s.roll)).forEach(s => addRow(s)); }
-    else if (roster.length) roster.forEach(s => addRow(s)); else for (let i = 0; i < 5; i++) addRow({roll: String(i + 1)});
-    recalc(); };
-  $('#eQ').oninput = () => { const q = $('#eQ').value.trim().toLowerCase(); $$('#eTbl tbody tr').forEach(tr => { const t = ($('.eRoll', tr).value + ' ' + $('.eName', tr).value + ' ' + rosterFather($('#eCls').value, $('.eRoll', tr).value.trim())).toLowerCase(); tr.classList.toggle('hidden', !!q && !q.split(/\s+/).every(w => t.includes(w))); }); };
+    <div class="ent-acts"><button class="btn big" id="saveTest">✅ Submit marks</button>
+      <button class="btn sec sm" id="toMyStu">👥 Add / edit students</button></div></div>`;
+  let cur = fixed; // the test being edited (fixed, or an existing test for the same date + class + subject)
+  const sel = () => ({subject: $('#eSub').value, cls: $('#eCls').value, date: $('#eDate').value || today(), total: parseFloat($('#eTotal').value)});
+  const rowHTML = (s, obt) => `<div class="ent-row" data-roll="${esc(s.roll)}" data-name="${esc(s.name)}" data-q="${esc([s.roll, s.name, s.father].join(' ').toLowerCase())}">
+      <span class="ent-roll">${esc(s.roll)}</span><span class="ent-name">${esc(s.name)}${s.father ? `<small>s/o ${esc(s.father)}</small>` : ''}${s.gone ? '<small class="down">not in class list</small>' : ''}</span>
+      <input class="eObt" value="${obt == null ? '' : esc(obt)}" inputmode="decimal" placeholder="—" aria-label="Marks for ${esc(s.name)}" autocomplete="off"><span class="ePct"></span></div>`;
+  const load = () => {
+    const {subject, cls, date} = sel(); if (!fixed) cur = findTest(date, cls, subject) || null;
+    if (cur && !fixed && !canEditTest(cur)) cur = null;
+    const roster = classRoster(cls), marks = {}; if (cur) cur.rows.forEach(r => marks[r.roll] = r.obt == null ? 'L' : r.obt);
+    if (cur) cur.rows.filter(r => !roster.some(s => s.roll === r.roll)).forEach(r => roster.push({roll: r.roll, name: r.name, gone: true}));
+    $('#eExist').innerHTML = cur && !fixed ? `<div class="ent-note">✏️ Marks for <b>${esc(subject)}</b>, ${esc(cls)} on ${fmtD(date)} were already entered${cur.teacherName ? ` by ${esc(cur.teacherName)}` : ''}. They are loaded below – <b>Submit updates them</b> (no duplicate test).</div>` : '';
+    if (cur && !fixed && !$('#eTotal').value) $('#eTotal').value = cur.total;
+    $('#saveTest').textContent = cur ? '💾 Save changes' : '✅ Submit marks';
+    $('#eList').innerHTML = roster.length ? roster.map(s => rowHTML(s, cur ? marks[s.roll] : '')).join('')
+      : `<div class="empty">No students in ${esc(cls)} yet. Students appear here after they register and are approved, or when you add them in <b>👥 Class Students</b>.</div>`;
+    $('#eCount').textContent = roster.length ? roster.length + ' students' : '';
+    $$('.eObt').forEach((i, k, all) => { i.oninput = recalc; i.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); const n = all[k + 1]; if (n) n.focus(); else $('#saveTest').focus(); } }; });
+    recalc(); $('#eQ').oninput(); };
+  $('#eQ').oninput = () => { const q = $('#eQ').value.trim().toLowerCase(); $$('.ent-row').forEach(r => r.classList.toggle('hidden', !!q && !q.split(/\s+/).every(w => r.dataset.q.includes(w)))); };
   function recalc() {
-    const total = parseFloat($('#eTotal').value); let sum = 0, n = 0, ab = 0, bad = 0, npass = 0;
-    let empty = 0;
-    $$('#eTbl tbody tr').forEach(tr => { const v = $('.eObt', tr).value.trim(); const cell = $('.ePct', tr); const lv = $('.eLeave', tr).checked || /^[al]$/i.test(v);
-      if (lv) { cell.innerHTML = '<span class="badge warn">Leave</span>'; ab++; return; }
-      if (v === '') { cell.textContent = ''; if ($('.eName', tr).value.trim()) empty++; return; }
-      const o = parseFloat(v); if (isNaN(o) || (total && o > total) || o < 0) { cell.innerHTML = '<span class="down">check</span>'; bad++; return; }
-      n++; sum += o; const pc = total ? o / total * 100 : null; if (pc != null && isPass(pc, $('#eSub').value)) npass++; cell.innerHTML = total ? `${p1(pc)} ${passBadge(pc, $('#eSub').value)}` : ''; });
-    $('#eSummary').innerHTML = total ? `Students with marks: <b>${n}</b> · Leave: <b>${ab}</b>${empty ? ` (+${empty} empty → leave)` : ''} · Class average: <b>${n ? p1(sum / n / total * 100) : '–'}</b> · Pass (≥${passMark($('#eSub').value)}%): <b class="up">${npass}</b> · Fail: <b class="down">${n - npass}</b>${bad ? ` · <span class="down">${bad} invalid</span>` : ''}` : 'Enter total marks to see percentages.';
+    const {total, subject} = sel(); let sum = 0, n = 0, ab = 0, bad = 0, npass = 0;
+    $$('.ent-row').forEach(tr => { const v = $('.eObt', tr).value.trim(), cell = $('.ePct', tr); tr.classList.remove('onleave', 'bad');
+      if (v === '' || /^[al]$/i.test(v)) { cell.innerHTML = v ? '<span class="badge warn">Leave</span>' : ''; if (v) tr.classList.add('onleave'); ab++; return; }
+      const o = parseFloat(v); if (isNaN(o) || !/^\d+(\.\d+)?$/.test(v) || (total && o > total) || o < 0) { cell.innerHTML = '<span class="down">check</span>'; tr.classList.add('bad'); bad++; return; }
+      n++; sum += o; const pc = total ? o / total * 100 : null; if (pc != null && isPass(pc, subject)) npass++; cell.innerHTML = total ? `${p1(pc)}` : ''; });
+    $('#eSummary').innerHTML = total ? `Marks: <b>${n}</b> · Leave/empty: <b>${ab}</b> · Average: <b>${n ? p1(sum / n / total * 100) : '–'}</b> · Pass (≥${passMark(subject)}%): <b class="up">${npass}</b> · Fail: <b class="down">${n - npass}</b>${bad ? ` · <span class="down">${bad} invalid</span>` : ''}` : 'Enter total marks at the top to see percentages.';
   }
-  $('#eCls').onchange = () => { STATE.entryCls = $('#eCls').value; loadRoster();
-    const sel = $('#eSub'), cur = sel.value, l = subsFor(STATE.entryCls); // each class shows its own subjects (e.g. Class 8: Urdu, English, Islamiat, Mathematics, Science)
-    sel.innerHTML = opts(l, l.includes(cur) ? cur : (l.includes(STATE.entrySub) ? STATE.entrySub : l[0])) + '<option value="__add">➕ Add subject…</option>';
-    prevSub = sel.value; STATE.entrySub = prevSub; recalc(); };
-  let prevSub = $('#eSub').value === '__add' ? '' : $('#eSub').value;
+  const refreshCls = () => { const l = clsFor($('#eSub').value), c = $('#eCls').value; $('#eCls').innerHTML = opts(l, l.includes(c) ? c : l[0]); };
+  let prevSub = $('#eSub').value;
   const closeAdd = () => { $('#eSubAdd').classList.add('hidden'); if ($('#eSub').value === '__add') $('#eSub').value = prevSub; };
-  $('#eSub').onchange = () => { if ($('#eSub').value === '__add') { $('#eSubAdd').classList.remove('hidden'); $('#eSubNew').focus(); } else { prevSub = $('#eSub').value; STATE.entrySub = prevSub; closeAdd(); } };
-  $('#eSubX').onclick = closeAdd;
-  $('#eSubNew').onkeydown = e => { if (e.key === 'Enter') $('#eSubSave').click(); };
-  $('#eSubSave').onclick = () => { try { const r = addSubject($('#eSubNew').value); const sel = $('#eSub');
-      if (![...sel.options].some(o => o.value === r.name)) sel.insertBefore(new Option(r.name, r.name), sel.querySelector('option[value="__add"]'));
-      { const g = splitCk($('#eCls').value).grade; const m = (db.classSubjects || {})[g]; if (m && !m.includes(r.name)) { m.push(r.name); save(); } }
-      sel.value = r.name; prevSub = STATE.entrySub = r.name; $('#eSubNew').value = ''; $('#eSubAdd').classList.add('hidden');
-      toast(r.existed ? `"${r.name}" already exists – selected it` : `Subject "${r.name}" added ✓${online() ? '' : ' (will sync when online)'}`); } catch (e) { toast(e.message); } };
-  $('#eTotal').oninput = recalc; $('#addRow').onclick = () => { const rolls = $$('.eRoll').map(i => parseInt(i.value)).filter(n => !isNaN(n)); addRow({roll: String(rolls.length ? Math.max(...rolls) + 1 : 1)}); };
-  if (edit) $('#cancelEdit').onclick = () => { STATE.editId = null; go('tests'); };
+  $('#eSub').onchange = () => { if ($('#eSub').value === '__add') { $('#eSubAdd').classList.remove('hidden'); $('#eSubNew').focus(); return; } prevSub = STATE.entrySub = $('#eSub').value; closeAdd(); refreshCls(); STATE.entryCls = $('#eCls').value; load(); };
+  $('#eCls').onchange = () => { STATE.entryCls = $('#eCls').value; load(); };
+  $('#eDate').onchange = () => { STATE.entryDate = $('#eDate').value; load(); };
+  $('#eTotal').oninput = recalc;
+  if (!fixed) {
+    $('#eSubX').onclick = closeAdd; $('#eSubNew').onkeydown = e => { if (e.key === 'Enter') $('#eSubSave').click(); };
+    $('#eSubSave').onclick = () => { try { const r = addSubject($('#eSubNew').value); const s = $('#eSub');
+        { const g = splitCk($('#eCls').value).grade; const m = (db.classSubjects || {})[g]; if (m && !m.includes(r.name)) { m.push(r.name); save(); } }
+        if (![...s.options].some(o => o.value === r.name)) s.insertBefore(new Option(r.name, r.name), s.querySelector('option[value="__add"]'));
+        s.value = r.name; prevSub = STATE.entrySub = r.name; $('#eSubNew').value = ''; $('#eSubAdd').classList.add('hidden'); load();
+        toast(r.existed ? `"${r.name}" already exists – selected it` : `Subject "${r.name}" added ✓${online() ? '' : ' (will sync when online)'}`); } catch (e) { toast(e.message); } };
+  } else $('#cancelEdit').onclick = () => { STATE.editId = null; go('tests'); };
+  $('#toMyStu').onclick = () => go('mystudents', {myStuCls: $('#eCls').value, scrollTo: 'msForm'});
   $('#saveTest').onclick = () => {
-    const date = $('#eDate').value, cls = $('#eCls').value, subject = $('#eSub').value, total = parseFloat($('#eTotal').value);
-    if (!date || !cls || !subject || subject === '__add') return toast('Choose date, class and subject');
-    if (!(total > 0)) return toast('Enter total marks');
-    const rows = [], emptyRows = []; let err = '';
-    $$('#eTbl tbody tr').forEach(tr => { const roll = $('.eRoll', tr).value.trim(), name = $('.eName', tr).value.trim(), v = $('.eObt', tr).value.trim();
-      if (!roll && !name) return; if (!roll || !name) { err = 'Each student needs roll # and name'; return; }
-      const lv = $('.eLeave', tr).checked || /^[al]$/i.test(v); if (!lv && v === '') emptyRows.push(`#${roll} ${name}`);
-      let obt = null; if (!lv && v !== '') { obt = parseFloat(v); if (isNaN(obt) || obt < 0 || obt > total) { err = `Marks for ${name} must be 0–${total}`; return; } }
+    const {subject, cls, date, total} = sel();
+    if (!cls || !subject || subject === '__add') return toast('Choose subject and class');
+    if (!(total > 0)) { $('#eTotal').focus(); return toast('Enter total marks at the top'); }
+    const rows = [], empty = []; let err = '';
+    $$('.ent-row').forEach(tr => { const roll = tr.dataset.roll, name = tr.dataset.name, v = $('.eObt', tr).value.trim(); if (err) return;
+      const lv = v === '' || /^[al]$/i.test(v); if (v === '') empty.push(`#${roll} ${name}`);
+      let obt = null; if (!lv) { obt = parseFloat(v); if (!/^\d+(\.\d+)?$/.test(v) || obt > total) { err = `Marks for ${name} (roll ${roll}) must be 0–${total}`; return; } }
       if (rows.some(r => r.roll === roll)) { err = `Roll # ${roll} is repeated`; return; }
       rows.push({roll, name, obt, status: obt == null ? 'leave' : 'present'}); });
-    if (err) return toast(err); if (!rows.length) return toast('Add at least one student');
-    if (emptyRows.length && !confirm(`No marks entered for ${emptyRows.length} student(s). They will be counted as LEAVE (چھٹی) for this test:\n\n${emptyRows.join('\n')}\n\nSave anyway?`)) return;
-    const {grade: g, section} = splitCk(cls); const m = me();
-    const dup = db.tests.find(t => t.id !== (edit && edit.id) && t.date === date && testCk(t) === cls && t.subject === subject);
-    if (dup && !confirm(`A ${subject} test for ${cls} on ${fmtD(date)} already exists. Save another one?`)) return;
-    const rec = {id: edit ? edit.id : uid(), date, grade: g, section, subject, total, rows, teacherId: edit ? edit.teacherId : m.id,
-      teacherName: edit ? edit.teacherName : m.name, synced: false, updatedAt: new Date().toISOString()};
-    if (edit) Object.assign(edit, rec); else db.tests.push(rec);
-    rememberRoster(cls, rows); Object.assign(STATE, {entryCls: cls, entrySub: subject, entryDate: date, entryTotal: total, editId: null}); save();
+    if (err) return toast(err); if (!rows.length) return toast('No students in this class yet');
+    if (!rows.some(r => r.obt != null)) return toast('Enter marks for at least one student');
+    if (empty.length && !confirm(`No marks for ${empty.length} student(s). They will be counted as LEAVE (چھٹی):\n\n${empty.slice(0, 15).join('\n')}${empty.length > 15 ? '\n…' : ''}\n\nSave anyway?`)) return;
+    const {grade: g, section} = splitCk(cls), m = me();
+    const other = findTest(date, cls, subject, cur && cur.id); // still a duplicate? (e.g. edited test moved onto another) → update that one instead
+    let target = cur; if (!target && other) target = other;
+    const rec = {id: target ? target.id : uid(), date, grade: g, section, subject, total, rows, teacherId: target ? target.teacherId : m.id,
+      teacherName: target ? target.teacherName : m.name, synced: false, updatedAt: new Date().toISOString()};
+    if (target) Object.assign(target, rec); else db.tests.push(rec);
+    Object.assign(STATE, {entryCls: cls, entrySub: subject, entryDate: date, entryTotal: total, editId: null}); save();
     const nM = rows.filter(r => r.obt != null).length, nL = rows.length - nM;
-    toast(edit ? 'Test updated ✓' : `✅ Marks submitted: ${subject}, ${cls} – ${nM} students${nL ? ` + ${nL} on leave` : ''}. ${online() ? 'Syncing…' : 'Saved offline – will sync when online.'}`); syncNow(false); go(edit ? 'tests' : 'entry');
+    toast(`${target ? '💾 Marks updated' : '✅ Marks submitted'}: ${subject}, ${cls} – ${nM} students${nL ? ` + ${nL} on leave` : ''}. ${online() ? 'Syncing…' : 'Saved offline – will sync when online.'}`); syncNow(false); go(fixed ? 'tests' : 'entry');
   };
-  loadRoster();
+  load();
 }
 
 /* ------------------------------------------------------------------ tests list */
@@ -1000,6 +1042,7 @@ function viewSettings() {
       <label>Recovery email (optional) <span class="ur">ای میل</span></label><input id="pEmail" type="email" inputmode="email" autocapitalize="none" value="${esc(u.email || '')}" placeholder="for a password reset code">
       <button class="btn" id="pSave">Save</button><button class="btn sec" onclick="syncNow(true)">⟳ Sync now</button><button class="btn red" id="pOut">Log out</button></div>` :
     `<div class="card"><h2>My profile <span class="ur">میری معلومات</span></h2>
+    <label>Profile picture <span class="ur">تصویر</span></label>${photoPickerHTML('pPhoto', u.photo || '')}
     <div class="row"><div><label>Name</label><input id="pName" value="${esc(u.name)}"></div><div><label>Phone</label><input id="pPhone" value="${esc(u.phone || '')}"></div></div>
     <label>Recovery email ${u.role === 'owner' ? '*' : '(optional)'} <span class="ur">ای میل</span></label><input id="pEmail" type="email" inputmode="email" autocapitalize="none" value="${esc(u.email || '')}" placeholder="for a password reset code">
     <label>Subjects I teach <span class="ur">میرے مضامین</span></label>${chipsHTML('pSub', db.subjects, u.subjects || [])}
@@ -1020,6 +1063,7 @@ function viewSettings() {
   const saveEmail = () => { u.email = cleanEmail($('#pEmail').value, u.role === 'owner'); };
   if (stu) { $('#pSave').onclick = () => { try { saveEmail(); } catch (e) { return toast(e.message); } u.profileDirty = true; save(); syncNow(false); toast('Saved ✓'); render(); }; return; }
   bindChips('pSub'); bindChips('pCls'); bindBackup();
+  bindPhotoPicker('pPhoto', () => u.photo || '', v => { u.photo = v; u.profileDirty = true; save(); renderUserMenu(); toast(v ? 'Picture updated ✓ – syncing' : 'Picture removed'); syncNow(false); });
   $('#pSave').onclick = () => { try { saveEmail(); } catch (e) { return toast(e.message); } u.name = $('#pName').value.trim() || u.name; u.phone = $('#pPhone').value.trim();
     u.subjects = $$('#pSub input:checked').map(i => i.value); u.classes = $$('#pCls input:checked').map(i => i.value); u.profileDirty = true; save(); syncNow(false); toast('Profile saved ✓'); render(); };
 }
@@ -1048,7 +1092,7 @@ async function boot() {
 }
 boot();
 
-export {db, $, $$, esc, uid, ymd, parseD, addDays, today, fmtD, pct, p1, r1, grade, gradeBadge, toast, weekRange, monthRange, daysBetween,
+export {avatarHTML, classRoster, findTest, db, $, $$, esc, uid, ymd, parseD, addDays, today, fmtD, pct, p1, r1, grade, gradeBadge, toast, weekRange, monthRange, daysBetween,
   save, ck, splitCk, testCk, me, isAdmin, isOwner, myClasses, canEditTest, mySubjects, allClassKeys, allSubjects, applyBranding, testsIn, classAvg, go, STATE,
   render, app, opts, meStudent, sessionUser, updateNotesBadge, postJSON, getJSON, hashPw, logout, chipsHTML, bindChips, download, toCSV, flatRows, syncNow, pullNow, pendingCount,
   DEFAULT_NAME, rememberRoster, setUserStatus, adminResetPassword, adminSetEmail, fullName, splitName, contactHTML, SEC_QS, isLeave, backupHTML, bindBackup, backupJSON, exportCSV, online, getToken, annFor, annUnread, annVisible, updateBell, bindAnnFiles,

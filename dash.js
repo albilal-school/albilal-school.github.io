@@ -2,7 +2,7 @@
    Loaded only when a dashboard/report screen is opened. Chart.js (vendored, MIT) is loaded on demand too. */
 import {db, $, $$, esc, ymd, parseD, addDays, today, fmtD, pct, p1, r1, grade, gradeBadge, toast, weekRange, monthRange, daysBetween,
   save, ck, splitCk, testCk, me, isAdmin, myClasses, allClassKeys, allSubjects, applyBranding, testsIn, classAvg, go, STATE,
-  render, app, opts, download, DEFAULT_NAME, setUserStatus, backupHTML, bindBackup, online, getJSON, sessionUser, isOwner, adminResetPassword, adminSetEmail, fullName, SEC_QS, newPin, rememberRoster, meStudent, annFor, tilesHTML, addSubject, renameSubjectLocal, addRosterStudent, passMark, isPass, passBadge, splitName, postJSON, pullNow, honorMiniHTML} from './app.js';
+  render, app, opts, download, DEFAULT_NAME, setUserStatus, backupHTML, bindBackup, online, getJSON, sessionUser, isOwner, adminResetPassword, adminSetEmail, fullName, SEC_QS, newPin, rememberRoster, meStudent, annFor, tilesHTML, addSubject, renameSubjectLocal, addRosterStudent, passMark, isPass, passBadge, splitName, postJSON, pullNow, honorMiniHTML, classRoster, avatarHTML} from './app.js';
 
 let chartP = null;
 function ensureChart() {
@@ -141,14 +141,14 @@ function myStudentsCardHTML() {
   const acct = r => db.users.find(u => u.role === 'student' && u.cls === c && u.roll === r);
   const ed = STATE.msEdit ? list.find(x => x.roll === STATE.msEdit) : null; if (!ed) STATE.msEdit = '';
   return `<div class="card" id="myStuCard"><div class="card-h"><h2>🎓 Class Students <span class="ur">کلاس کے طلبہ</span></h2><span class="badge">${list.length} in ${esc(c)}</span></div>
-    <div class="row"><div><label>Class</label><select id="msCls">${opts(cls, c)}</select></div><div><label>Search</label><input id="msQ" type="search" placeholder="🔍 Name, roll, father or mobile"></div></div>
+    <div class="row"><div><label>Class</label><select id="msCls">${opts(cls, c)}</select></div><div><label>Search</label><input id="msQ" type="search" placeholder="🔍 Name, roll, father or contact no"></div></div>
     <div class="card" style="background:#f6faf8" id="msForm"><h3>${ed ? `✏️ Edit roll ${esc(ed.roll)} – ${esc(c)}` : '➕ Add a student'}</h3>
-      <div class="row"><div><label>Roll Number *</label><input id="msRoll" inputmode="numeric" value="${ed ? esc(ed.roll) : ''}" ${ed ? 'disabled' : ''}></div><div><label>Class &amp; section *</label><select id="msCls2" ${ed ? 'disabled' : ''}>${opts(cls, c)}</select></div></div>
+      <div class="row"><div><label>Roll Number *</label><input id="msRoll" inputmode="numeric" value="${ed ? esc(ed.roll) : ''}">${ed ? '<small class="muted">Change only if wrong – must be unique in the class; old marks move to the new roll.</small>' : ''}</div><div><label>Class &amp; section *</label><select id="msCls2" ${ed ? 'disabled' : ''}>${opts(cls, c)}</select></div></div>
       <div class="row"><div><label>First Name *</label><input id="msFirst" value="${ed ? esc(ed.first || splitName(ed).first) : ''}"></div><div><label>Last Name *</label><input id="msLast" value="${ed ? esc(ed.last ?? splitName(ed).last) : ''}"></div></div>
-      <div class="row"><div><label>Father's Name *</label><input id="msFather" value="${ed ? esc(ed.father || '') : ''}"></div><div><label>Mobile Number <span class="ur">موبائل</span></label><input id="msPhone" type="tel" inputmode="tel" placeholder="03001234567" maxlength="20" value="${ed ? esc(ed.phone || '') : ''}"></div></div>
+      <div class="row"><div><label>Father's Name *</label><input id="msFather" value="${ed ? esc(ed.father || '') : ''}"></div><div><label>Contact Number <span class="ur">رابطہ نمبر</span></label><input id="msPhone" type="tel" inputmode="tel" placeholder="03001234567" maxlength="20" value="${ed ? esc(ed.phone || '') : ''}"></div></div>
       ${ed ? '<button class="btn" id="msSave">💾 Save changes</button> <button class="btn sec" id="msCancel">Cancel</button>' : '<button class="btn" id="msAdd">➕ Add student</button>'}
       <p class="muted">The student is ready for marks entry at once. To log in, the student registers on the Student page with the same class + roll number (or the admin approves) – the account links to this entry. Deleting hides the student but keeps all their marks; the admin can restore.</p></div>
-    ${list.length ? `<div class="tbl-wrap"><table id="msTbl" class="ptbl"><tr><th>Roll</th><th>Name</th><th>Father's name</th><th>Mobile</th><th>Login account</th><th></th></tr>${list.map(x => { const a = acct(x.roll), ph = x.phone || (a && a.phone) || '';
+    ${list.length ? `<div class="tbl-wrap"><table id="msTbl" class="ptbl"><tr><th>Roll</th><th>Name</th><th>Father's name</th><th>Contact No</th><th>Login account</th><th></th></tr>${list.map(x => { const a = acct(x.roll), ph = x.phone || (a && a.phone) || '';
       return `<tr data-q="${esc([x.roll, fullName(x), x.father, ph].join(' ').toLowerCase())}"><td>${esc(x.roll)}</td><td class="pname">${esc(fullName(x))}${x.addedBy ? ` <small class="muted">· added by ${esc(x.addedBy)}</small>` : ''}${x.isNew || x.dirty ? ' <span class="badge warn">queued</span>' : ''}</td><td>${esc(x.father || '–')}</td><td>${ph ? `<a href="tel:${esc(ph.replace(/\s/g, ''))}">${esc(ph)}</a>` : '-'}</td><td>${a ? `<span class="badge ${a.status === 'approved' ? '' : 'warn'}">${esc(a.status)}</span>` : '<span class="muted">not registered</span>'}</td>
         <td class="acts"><button class="btn sm sec" data-msed="${esc(x.roll)}">Edit</button><button class="btn sm red" data-msdel="${esc(x.roll)}">Delete</button></td></tr>`; }).join('')}</table></div>`
       : '<div class="muted">No students in this class yet.</div>'}</div>`;
@@ -160,11 +160,26 @@ function bindMyStudents() {
   $('#msQ').oninput = qf;
   if ($('#msAdd')) $('#msAdd').onclick = () => { try { const r = addRosterStudent({roll: $('#msRoll').value, first: $('#msFirst').value, last: $('#msLast').value, father: $('#msFather').value, phone: $('#msPhone').value, cls: $('#msCls2').value});
       toast(`Roll ${r.roll} added to ${r.cls} ✓`); STATE.myStuCls = r.cls; STATE.scrollTo = 'myStuCard'; render(); } catch (e) { toast(e.message); } };
-  if ($('#msSave')) $('#msSave').onclick = () => { const rec = (db.students[c] || []).find(x => x.roll === STATE.msEdit); if (!rec) return;
-    const first = $('#msFirst').value.trim(), last = $('#msLast').value.trim(), father = $('#msFather').value.trim(), phone = $('#msPhone').value.trim();
+  if ($('#msSave')) $('#msSave').onclick = async () => { const rec = (db.students[c] || []).find(x => x.roll === STATE.msEdit); if (!rec) return;
+    const first = $('#msFirst').value.trim(), last = $('#msLast').value.trim(), father = $('#msFather').value.trim(), phone = $('#msPhone').value.trim(), roll = $('#msRoll').value.trim();
     if (!first || !last || !father) return toast('First, last and father\'s name are required');
-    if (phone && !/^[0-9+\- ]{7,20}$/.test(phone)) return toast('Mobile number: digits only, e.g. 03001234567');
-    Object.assign(rec, {first, last, father, phone, name: `${first} ${last}`, dirty: true}); db.settings.rosterDirty = true; STATE.msEdit = ''; save(); toast('Student updated ✓'); window.syncNow(false); STATE.scrollTo = 'myStuCard'; render(); };
+    if (phone && !/^[0-9+\- ]{7,20}$/.test(phone)) return toast('Contact number: digits only, e.g. 03001234567');
+    if (!/^[A-Za-z0-9-]{1,10}$/.test(roll)) return toast('Roll number: letters/numbers only');
+    const oldRoll = rec.roll;
+    if (roll !== oldRoll) { // v12: roll numbers are unique per class (class list + registered accounts)
+      const taken = (db.students[c] || []).find(x => x !== rec && x.roll === roll) || db.users.find(u => u.role === 'student' && u.cls === c && u.roll === roll && u.status !== 'rejected' && !(u.roll === oldRoll));
+      if (taken) return toast(`⛔ Roll ${roll} is already used in ${c} by ${fullName(taken) || taken.name}`);
+      if (!rec.isNew) { // already on the server → change it there first (moves marks + login account too)
+        if (!online()) return toast('Changing a roll number needs internet');
+        const {grade: g, section} = splitCk(c); const btn = $('#msSave'); btn.disabled = true;
+        try { const r = await postJSON(db.settings.scriptUrl, {action: 'student_update', class: g, section, old_roll: oldRoll, roll_no: roll, first_name: first, last_name: last, father_name: father, phone});
+          if (!r.ok) throw new Error(/unknown action/i.test(r.error || '') ? 'Changing a roll number needs the updated server – ask the admin to redeploy the Apps Script (v12).' : r.error);
+        } catch (e) { btn.disabled = false; return toast('⛔ ' + e.message); } }
+      db.tests.filter(t => testCk(t) === c).forEach(t => t.rows.forEach(x => { if (x.roll === oldRoll) { x.roll = roll; if (rec.isNew) t.synced = false; } }));
+      db.users.filter(u => u.role === 'student' && u.cls === c && u.roll === oldRoll).forEach(u => u.roll = roll);
+    }
+    Object.assign(rec, {roll, first, last, father, phone, name: `${first} ${last}`, dirty: true}); db.settings.rosterDirty = true; STATE.msEdit = ''; save();
+    toast(roll !== oldRoll ? `Student updated ✓ – roll ${oldRoll} → ${roll}` : 'Student updated ✓'); window.syncNow(false); STATE.scrollTo = 'myStuCard'; render(); };
   if ($('#msCancel')) $('#msCancel').onclick = () => { STATE.msEdit = ''; render(); };
   $$('[data-msed]').forEach(b => b.onclick = () => { STATE.msEdit = b.dataset.msed; STATE.scrollTo = 'msForm'; render(); });
   $$('[data-msdel]').forEach(b => b.onclick = () => { const r = b.dataset.msdel, rec = (db.students[c] || []).find(x => x.roll === r); if (!rec) return;
@@ -282,7 +297,7 @@ function pendingReqHTML(role) {
   if (!L.length) return '';
   const chips = (key, all, sel) => `<div class="chips" data-${key}>${all.map(v => `<label class="chip ${sel.includes(v) ? 'on' : ''}"><input type="checkbox" value="${esc(v)}" ${sel.includes(v) ? 'checked' : ''}>${esc(v)}</label>`).join('')}</div>`;
   return `<div class="reqs" id="${role}Reqs"><h3>⏳ Pending requests <span class="badge warn">${L.length}</span></h3>${L.map(u => `<div class="req" data-req="${esc(u.username)}">
-    <div class="req-h"><div class="req-name">${esc(dispName(u))}</div><span class="badge warn">pending</span></div>
+    <div class="req-h">${role === 'teacher' ? avatarHTML(u, 44) : ''}<div class="req-name">${esc(dispName(u))}</div><span class="badge warn">pending</span></div>
     <div class="req-meta"><span>${role === 'teacher' ? '👩‍🏫 Teacher request' : '🎓 Student request'}</span><span>@${esc(u.username)}</span>
       ${role === 'student' ? `<span>🏫 ${esc(u.cls || '–')} · Roll ${esc(u.roll || '–')}</span>${u.father ? `<span>Father: ${esc(u.father)}</span>` : ''}` : ''}
       ${u.phone ? `<span>📞 ${esc(u.phone)}</span>` : ''}${u.email ? `<span>✉️ ${esc(u.email)}</span>` : ''}${u.createdAt ? `<span>🗓️ ${fmtD(String(u.createdAt).slice(0, 10))}</span>` : ''}</div>
@@ -325,7 +340,7 @@ function teachersSecHTML() {
     ${list.length ? `<div class="tbl-wrap"><table id="tTbl" class="ptbl"><tr><th>Name</th><th>Username</th><th>Phone / email</th><th>Subjects</th><th>Classes</th><th>Status</th><th>Joined</th><th>Last sync</th><th class="num">Tests</th><th>Actions</th></tr>
       ${list.map(u => { const mine = db.tests.filter(t => t.teacherName === u.name || t.teacherId === u.id);
         const q = [u.name, u.username, u.phone, u.email, ...(u.subjects || []), ...(u.classes || [])].join(' ').toLowerCase();
-        return `<tr data-q="${esc(q)}" data-user="${esc(u.username)}"><td class="pname"><b>${esc(dispName(u))}</b>${u.mustChange ? ' <span class="badge warn">must change pw</span>' : ''}</td><td>${esc(u.username)}</td>
+        return `<tr data-q="${esc(q)}" data-user="${esc(u.username)}"><td class="pname">${u.role !== 'student' ? avatarHTML(u, 32) + ' ' : ''}<b>${esc(dispName(u))}</b>${u.mustChange ? ' <span class="badge warn">must change pw</span>' : ''}</td><td>${esc(u.username)}</td>
           <td>${esc(u.phone || '–')}${u.email ? `<div class="muted" style="font-size:12px">✉️ ${esc(u.email)}</div>` : ''}</td><td>${esc((u.subjects || []).join(', ') || 'all')}</td><td>${esc((u.classes || []).join(', ') || 'all')}</td>
           <td>${stBadge(u.status)}</td><td>${u.createdAt ? fmtD(String(u.createdAt).slice(0, 10)) : '–'}</td><td>${ago(u.lastSeen)}</td><td class="num">${mine.length}</td>
           <td class="acts">${statusBtns(u)}<button class="btn sm sec" data-tedit="${esc(u.username)}">✏️ Edit</button><button class="btn sm sec" data-ttests="${esc(u.username)}">📋 Tests</button></td></tr>
@@ -768,4 +783,46 @@ function mostLeaves(tests) {
   const list = Object.values(by).sort((a, b) => b.n - a.n).slice(0, 10);
   if (!list.length) return '<div class="muted">No leaves in this period 🎉</div>';
   return `<div class="tbl-wrap"><table><tr><th>Class</th><th>Roll</th><th>Name</th><th class="num">Leaves</th><th>By subject</th></tr>${list.map(o => `<tr><td>${esc(o.cls)}</td><td>${esc(o.roll)}</td><td>${esc(o.name)}</td><td class="num"><b>${o.n}</b></td><td class="muted">${esc(Object.entries(o.subj).map(([k, v]) => k + ' ' + v).join(', '))}</td></tr>`).join('')}</table></div>`;
+}
+
+/* ------------------------------------------------------------------ v12: whole-class result (teacher portal) */
+export function viewClassResult() {
+  const all = isAdmin() ? allClassKeys() : myClasses();
+  if (!all.length) { app().innerHTML = '<div class="card"><h2>📊 Class Result</h2><p class="muted">No classes are assigned to you yet.</p></div>'; return; }
+  const cls = all.includes(STATE.crCls) ? STATE.crCls : all[0]; STATE.crCls = cls;
+  const from = STATE.crFrom || '', to = STATE.crTo || '';
+  const inRange = testsIn({cls, from: from || undefined, to: to || undefined}).slice().sort((a, b) => a.date.localeCompare(b.date) || a.subject.localeCompare(b.subject));
+  const tid = inRange.some(t => t.id === STATE.crTest) ? STATE.crTest : ''; STATE.crTest = tid;
+  const tests = tid ? inRange.filter(t => t.id === tid) : inRange;
+  const agg = aggregate(tests), subs = [...new Set(tests.map(t => t.subject))].sort();
+  const roster = classRoster(cls); roster.forEach(s => { if (!agg.some(a => a.roll === s.roll)) agg.push({roll: s.roll, name: s.name, obt: 0, total: 0, tests: 0, leave: 0, subj: {}, pct: null, rank: '–'}); });
+  const nm = r => { const s = roster.find(x => x.roll === r.roll); return s ? s.name : r.name; }, fa = r => (roster.find(x => x.roll === r.roll) || {}).father || '';
+  const res = s => { if (s.pct == null) return ''; const f = Object.entries(s.subj).filter(([k, v]) => v.pct != null && !isPass(v.pct, k)).map(([k]) => k); return !isPass(s.pct) || f.length ? 'fail' : 'pass'; };
+  const sorted = agg.slice().sort((a, b) => STATE.crSort === 'roll' ? (parseFloat(a.roll) || 0) - (parseFloat(b.roll) || 0) || String(a.roll).localeCompare(b.roll) : (a.pct == null) - (b.pct == null) || (b.pct ?? 0) - (a.pct ?? 0) || (parseFloat(a.roll) || 0) - (parseFloat(b.roll) || 0));
+  const present = agg.filter(s => s.pct != null), nPass = present.filter(s => res(s) === 'pass').length;
+  const lbl = tid ? `${fmtD(tests[0].date)} · ${tests[0].subject} test` : from || to ? `${from ? fmtD(from) : 'start'} – ${to ? fmtD(to) : 'today'}` : 'All tests';
+  app().innerHTML = `<div class="card no-print"><div class="card-h"><h2>📊 Class Result <span class="ur">کلاس کا رزلٹ</span></h2></div>
+    <div class="filters"><div><label>Class</label><select id="crCls">${opts(all, cls)}</select></div>
+      <div><label>From</label><input type="date" id="crFrom" value="${esc(from)}"></div><div><label>To</label><input type="date" id="crTo" value="${esc(to)}"></div>
+      <div><label>Test</label><select id="crTest"><option value="">All tests (${inRange.length})</option>${inRange.map(t => `<option value="${esc(t.id)}" ${t.id === tid ? 'selected' : ''}>${fmtD(t.date)} · ${esc(t.subject)} (/${t.total})</option>`).join('')}</select></div>
+      <div><label>Order</label><select id="crSort"><option value="pos">By position</option><option value="roll" ${STATE.crSort === 'roll' ? 'selected' : ''}>By roll no</option></select></div>
+      <div><label>Search</label><input id="crQ" type="search" placeholder="🔍 Name or roll"></div></div>
+    <button class="btn sec" id="crPrint">🖨️ Print / PDF</button>${from || to || tid ? '<button class="btn sec" id="crAll">Show all tests</button>' : ''}</div>
+  <div class="card cr-card"><div class="cr-head"><h3>${esc(school())} – ${esc(cls)} – Class Result</h3><div class="muted">${esc(lbl)} · ${tests.length} test(s) · ${roster.length || agg.length} students · Pass mark ${passMark()}%</div></div>
+  ${!tests.length ? '<div class="empty">No marks in this class for the chosen dates / test yet.</div>' : `
+  <div class="kpis cr-kpis">${[['Class average', p1(classAvg(tests))], ['Passed', `${nPass} / ${present.length}`], ['Failed', present.length - nPass], ['Top', sorted[0] && sorted[0].pct != null ? esc(nm(sorted[0])) : '–']].map(([k, v]) => `<div class="kpi"><small>${k}</small><b>${v}</b></div>`).join('')}</div>
+  <div class="tbl-wrap"><table id="crTbl" class="ptbl cr-tbl"><tr><th class="num">Pos</th><th>Roll</th><th>Name</th>${subs.map(x => `<th class="num">${esc(x)}</th>`).join('')}<th class="num">Grand total</th><th class="num">%</th><th>Result</th></tr>
+  ${sorted.map(s => { const r = res(s); return `<tr data-q="${esc([s.roll, nm(s), fa(s)].join(' ').toLowerCase())}" class="${r}"><td class="num"><b>${s.rank}</b></td><td>${esc(s.roll)}</td><td class="pname">${esc(nm(s))}${fa(s) ? `<small class="muted cr-fa"> s/o ${esc(fa(s))}</small>` : ''}</td>
+    ${subs.map(x => { const v = s.subj[x]; return `<td class="num">${!v ? '–' : v.pct == null ? '<span class="badge warn">Leave</span>' : `${r1(v.obt)}/${v.total}${isPass(v.pct, x) ? '' : ' <span class="down">✗</span>'}`}</td>`; }).join('')}
+    <td class="num"><b>${s.total ? `${r1(s.obt)}/${s.total}` : '–'}</b></td><td class="num"><b>${p1(s.pct)}</b></td><td>${r === 'pass' ? '<span class="badge">Pass</span>' : r === 'fail' ? '<span class="badge bad">Fail</span>' : '<span class="muted">–</span>'}</td></tr>`; }).join('')}
+  </table></div>
+  <p class="muted cr-note">Obtained/total = sum of the student's marks ÷ sum of total marks of the tests they attended (leave is not counted). Position by percentage (equal % share a position). Pass = ${passMark()}% overall and in every subject (✗ = failed subject).</p>`}
+  <div class="sig cr-sig"><div>Class Teacher</div><div>Principal</div></div></div>`;
+  const set = () => { Object.assign(STATE, {crCls: $('#crCls').value, crFrom: $('#crFrom').value, crTo: $('#crTo').value, crTest: $('#crTest').value, crSort: $('#crSort').value}); render(); };
+  ['#crCls', '#crFrom', '#crTo', '#crTest', '#crSort'].forEach(x => $(x).onchange = set);
+  $('#crCls').onchange = () => { Object.assign(STATE, {crCls: $('#crCls').value, crTest: ''}); render(); };
+  if ($('#crAll')) $('#crAll').onclick = () => { Object.assign(STATE, {crFrom: '', crTo: '', crTest: ''}); render(); };
+  $('#crPrint').onclick = () => print();
+  $('#crQ').oninput = () => { const q = $('#crQ').value.trim().toLowerCase(); $$('#crTbl tr[data-q]').forEach(r => r.classList.toggle('hidden', !!q && !q.split(/\s+/).every(w => r.dataset.q.includes(w)))); };
+  labelPtbls();
 }
