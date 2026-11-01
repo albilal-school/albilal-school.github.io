@@ -1207,13 +1207,16 @@ $('#netStatus').onclick = () => { SY.next = 0; syncNow(true); };
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(e => console.warn('SW', e));
 VIEW = hashView() || 'home';
 async function boot() {
-  if (online()) { // public info first: does an owner exist? school name/logo, public announcements
-    try { const p = await Promise.race([getJSON({action: 'public'}), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 5000))]);
+  const cached = db.settings.serverHasOwner !== undefined || !!sessionUser(); // v13 offline-first: a used phone shows its saved copy at once
+  if (cached) render();
+  if (online()) { // public info: does an owner exist? school name/logo, public announcements
+    const lim = pr => Promise.race([pr, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 6000))]);
+    try { const p = await lim(getJSON({action: 'public'}));
       if (p.ok) { applyServerSettings(p.settings || {}); mergeAnn(p.announcements || [], true); if (Array.isArray(p.honor)) db.publicHonor = p.honor; }
-      const s = await getJSON({action: 'status'}); if (s.ok) db.settings.serverHasOwner = !!s.has_owner; save();
+      const s = await lim(getJSON({action: 'status'})); if (s.ok) db.settings.serverHasOwner = !!s.has_owner; save();
     } catch (e) { console.warn('status check failed', e); }
   }
-  render();
+  if (!cached || safeToRender()) render();
   if (online()) syncNow(false).then(() => { if (!sessionUser() || !$('input:focus')) render(); });
 }
 boot();
