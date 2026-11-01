@@ -65,14 +65,17 @@ const DEFAULT_NAME = 'Albilal School System';
 const DEFAULT_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyA7VQFk32167btzweqNrVnIuDhzLVXo8Dq3uk9PS2QzomXOW6w6lUW2Ffeka4IDWvO/exec';
 // Subjects offered per grade. A grade not listed here shows every subject (9th / 10th keep the full list).
 const BASE_SUBJECTS = ['English', 'Urdu', 'Mathematics', 'Physics', 'Chemistry', 'Biology', 'Islamiat', 'Pakistan Studies', 'Tarjama-tul-Quran'];
-const CLASS_SUBJECTS = {'8th': ['Urdu', 'English', 'Islamiat', 'Mathematics', 'Science']};
+const PRIMARY_SUBJECTS = ['Urdu', 'English', 'Islamiat', 'Mathematics', 'Science', 'Social Studies'];
+const CLASS_SUBJECTS = {'2nd': PRIMARY_SUBJECTS, '3rd': PRIMARY_SUBJECTS, '4th': PRIMARY_SUBJECTS, '5th': PRIMARY_SUBJECTS, '6th': PRIMARY_SUBJECTS, '7th': PRIMARY_SUBJECTS,
+  '8th': ['Urdu', 'English', 'Islamiat', 'Mathematics', 'Science']}; // v13: the server list (Admin ▸ Classes & Subjects) replaces this after the first sync
+const DEFAULT_CLASSES = ['2nd', '3rd', '4th', '5th', '6th', '7th', '8th', '9th', '10th'].flatMap(g => [{grade: g, section: 'Boys'}, {grade: g, section: 'Girls'}]);
 function freshDB() {
   return {
-    classes: [{grade: '8th', section: 'Boys'}, {grade: '8th', section: 'Girls'}, {grade: '9th', section: 'Boys'}, {grade: '9th', section: 'Girls'}, {grade: '10th', section: 'Boys'}, {grade: '10th', section: 'Girls'}],
-    subjects: ['English', 'Urdu', 'Mathematics', 'Physics', 'Chemistry', 'Biology', 'Islamiat', 'Pakistan Studies', 'Tarjama-tul-Quran', 'Science'],
+    classes: DEFAULT_CLASSES.map(c => ({...c})),
+    subjects: [...BASE_SUBJECTS, 'Science', 'Social Studies'],
     classSubjects: JSON.parse(JSON.stringify(CLASS_SUBJECTS)),
-    users: [], students: {}, tests: [], deleted: [], notes: [], deletedNotes: [], chat: {}, chatQueue: [], announcements: [], deletedAnn: [], approvalQueue: [], deletedStudents: [], pendingSubjects: [], timetables: [], deletedTT: [], subjectMeta: {}, publicHonor: [],
-    settings: {schoolName: DEFAULT_NAME, logo: '', scriptUrl: DEFAULT_SCRIPT_URL, settingsDirty: false, rosterDirty: false, lastSync: '', lastPull: '', notesSeen: {}, annSeen: {}, honorLimit: 7,
+    users: [], students: {}, tests: [], deleted: [], notes: [], deletedNotes: [], chat: {}, chatQueue: [], announcements: [], deletedAnn: [], approvalQueue: [], deletedStudents: [], pendingSubjects: [], timetables: [], deletedTT: [], opQueue: [], syncIssues: [], pendingClasses: [], pendingSubjectGrade: {}, subjectMeta: {}, publicHonor: [],
+    settings: {schoolName: DEFAULT_NAME, logo: '', scriptUrl: DEFAULT_SCRIPT_URL, settingsDirty: false, rosterDirty: false, dataEpoch: '', lastSync: '', lastPull: '', notesSeen: {}, annSeen: {}, honorLimit: 7,
       teachersCanAnnounce: 'no', passPercent: 40, passOverrides: {}, serverHasOwner: false, reportKey: '', contact: {...DEFAULT_CONTACT}}
   };
 }
@@ -90,7 +93,7 @@ function addClass8() {
   db.classSubjects = {...CLASS_SUBJECTS, ...(db.classSubjects || {})};
   db.settings.class8Added = true;
 }
-function save() { localStorage.setItem(DB_KEY, JSON.stringify(db)); updateStatus(); }
+function save() { localStorage.setItem(DB_KEY, JSON.stringify(db)); updateStatus(); autoSyncSoon(); }
 const ck = c => `${c.grade} ${c.section}`;
 const splitCk = k => { const i = k.lastIndexOf(' '); return {grade: k.slice(0, i), section: k.slice(i + 1)}; };
 const testCk = t => `${t.grade} ${t.section}`;
@@ -134,13 +137,58 @@ function pendingCount() {
   return db.tests.filter(t => !t.synced).length + db.deleted.length + (db.settings.settingsDirty ? 1 : 0) + (db.settings.rosterDirty ? 1 : 0) + db.notes.filter(n => !n.synced).length +
     db.deletedNotes.length + db.users.filter(u => u.regQueued || u.ownerQueued || u.profileDirty).length + db.approvalQueue.length + db.chatQueue.length +
     db.announcements.filter(a => !a.synced).length + db.deletedAnn.length + db.deletedStudents.length + db.pendingSubjects.length +
-    (db.settings.ttServer === 'old' ? 0 : db.timetables.filter(t => t.dirty).length + db.deletedTT.length);
+    (db.settings.ttServer === 'old' ? 0 : db.timetables.filter(t => t.dirty).length + db.deletedTT.length) + db.opQueue.length + db.pendingClasses.length;
+}
+/* v13 auto-sync engine: every change is kept in the local outbox (localStorage, survives reloads) and pushed by itself –
+   right after a save, when the network comes back, when the app is opened / shown again, and every 15 s with back-off after errors.
+   Everything carries a client id (tests, notes, announcements, chat, timetables) or a natural key (class + roll), so a retry never duplicates. */
+const SY = {busy: false, again: false, chain: 0, fails: 0, next: 0, err: '', pulling: false, timer: 0};
+function autoSyncSoon() {
+  if (!db || !db.settings.scriptUrl) return;
+  if (SY.busy) { SY.again = true; return; }
+  if (SY.pulling || !navigator.onLine || !pendingCount() || Date.now() < SY.next) return;
+  clearTimeout(SY.timer); SY.timer = setTimeout(() => syncNow(false), 700);
+}
+function addIssue(msg) { db.syncIssues = (db.syncIssues || []).concat({at: new Date().toISOString(), msg}).slice(-8); toast(msg); }
+const dataSig = () => { try { return JSON.stringify([db.tests, db.students, db.users.map(u => [u.username, u.status, u.roll, u.cls, u.name, (u.photo || '').length]), db.timetables, db.announcements.length, db.notes.length, db.classes, db.subjects, db.classSubjects]).length + '|' + db.tests.length + '|' + JSON.stringify(db.students).length + '|' + db.users.length + '|' + JSON.stringify(db.classes).length; } catch (e) { return ''; } };
+const safeToRender = () => !STATE.formDirty && !document.querySelector('#app input:focus, #app textarea:focus, #app select:focus, .modal:not(.hidden)');
+function rerenderIfChanged(sig) { if (sig !== dataSig() && safeToRender()) render(); }
+async function autoPull() { if (SY.busy || SY.pulling || !online() || !getToken()) return; const sig = dataSig(); SY.pulling = true;
+  try { await pullNow(false); } finally { SY.pulling = false; updateStatus(); } rerenderIfChanged(sig); }
+function syncTick() {
+  if (!db || !db.settings.scriptUrl || !navigator.onLine || SY.busy || SY.pulling) return;
+  if (pendingCount()) { if (Date.now() >= SY.next) syncNow(false); return; }
+  if (document.visibilityState === 'visible' && getToken() && Date.now() - (Date.parse(db.settings.lastPull || '') || 0) > 90000) autoPull();
+}
+/** v13: the server's data epoch changes when the admin resets all school data → this phone drops its old copy (login kept) so nothing old is pushed back. */
+function applyEpoch(ep) {
+  ep = String(ep || ''); if (!ep || ep === db.settings.dataEpoch) return false;
+  const neverSynced = !db.settings.dataEpoch && !db.settings.lastPull && !db.settings.lastSync;
+  db.settings.dataEpoch = ep; if (neverSynced) { save(); return false; }
+  wipeLocal(); addIssue('🧹 The admin reset the school data – the old data on this phone was cleared (your login is kept).'); save(); return true;
+}
+function wipeLocal() {
+  const me0 = sessionUser(), f = freshDB();
+  for (const k of ['tests', 'deleted', 'students', 'notes', 'deletedNotes', 'chat', 'chatQueue', 'announcements', 'deletedAnn', 'approvalQueue', 'deletedStudents', 'pendingSubjects', 'pendingSubjectGrade',
+    'timetables', 'deletedTT', 'opQueue', 'pendingClasses', 'subjectMeta', 'publicHonor', 'classes', 'subjects', 'classSubjects']) db[k] = f[k];
+  db.users = me0 ? [me0] : []; if (me0) { me0.profileDirty = false; me0.regQueued = false; } delete db.myStats; delete db.audit; delete db.deletedRows;
+  Object.assign(db.settings, {settingsDirty: false, rosterDirty: false, subjectRenames: {}, lastPull: '', lastSync: ''}); delete db.settings.ttServer;
 }
 function updateStatus() {
   const on = navigator.onLine; const n = $('#netStatus'); if (!n || !db) return;
-  n.textContent = on ? '● Online' : '● Offline'; n.classList.toggle('off', !on);
-  const p = pendingCount();
-  $('#syncStatus').textContent = !db.settings.scriptUrl ? 'Local mode' : p ? `⟳ ${p} to sync` : '✓ Synced';
+  const p = pendingCount(), local = !db.settings.scriptUrl; let txt, cls = '';
+  if (local) txt = '● Local mode';
+  else if (!on) { txt = p ? `● Offline · ${p} pending` : '● Offline · all saved'; cls = 'off'; }
+  else if (SY.busy) { txt = '⟳ Syncing…'; cls = 'busy'; }
+  else if (p) { txt = SY.err ? `⚠ ${p} pending · retry soon` : `● Online · ${p} pending`; cls = 'pend'; }
+  else txt = '✓ Online · all saved';
+  n.textContent = txt; n.className = 'pill ' + cls; n.dataset.state = local ? 'local' : !on ? 'offline' : SY.busy ? 'syncing' : p ? 'pending' : 'saved';
+  n.title = (SY.err ? 'Last error: ' + SY.err + '\n' : '') + (db.settings.lastSync ? 'Last sync ' + new Date(db.settings.lastSync).toLocaleString() : 'Not synced yet') + ' – tap to sync now';
+  $('#syncStatus').textContent = db.settings.lastSync ? 'Synced ' + new Date(db.settings.lastSync).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) : '';
+  let box = $('#syncIssues'); const iss = db.syncIssues || [];
+  if (!box && iss.length) { box = document.createElement('div'); box.id = 'syncIssues'; box.className = 'sync-issues no-print'; $('#app').before(box); }
+  if (box) { box.classList.toggle('hidden', !iss.length); box.innerHTML = iss.length ? `<div><b>Sync notices</b>${iss.map(x => `<div>• ${esc(x.msg)} <small class="muted">${new Date(x.at).toLocaleString()}</small></div>`).join('')}</div><button class="btn sm sec" id="syncIssuesOk">OK</button>` : '';
+    const ok = $('#syncIssuesOk'); if (ok) ok.onclick = () => { db.syncIssues = []; save(); }; }
   const m = sessionUser(); $('#whoami').textContent = m ? whoText(m) : '';
   updateBell();
 }
@@ -150,8 +198,10 @@ function flatRows(t) {
 }
 // text/plain avoids a CORS pre-flight; Apps Script answers with JSON. The session token is added automatically.
 async function postJSON(url, body) {
-  const res = await fetch(url, {method: 'POST', body: JSON.stringify({token: getToken(), ...body}), headers: {'Content-Type': 'text/plain;charset=utf-8'}, redirect: 'follow'});
-  const j = await res.json(); if (j && j.auth) onAuthError(j.error); return j;
+  const res = await fetch(url, {method: 'POST', body: JSON.stringify({token: getToken(), epoch: (db && db.settings.dataEpoch) || '', ...body}), headers: {'Content-Type': 'text/plain;charset=utf-8'}, redirect: 'follow'});
+  const j = await res.json(); if (j && j.auth) onAuthError(j.error);
+  if (j && j.epoch_reset) { applyEpoch(j.data_epoch); const e = new Error('data reset'); e.epoch = true; throw e; } // old copy refused by the server
+  return j;
 }
 async function getJSON(params) {
   const url = db.settings.scriptUrl; const q = new URLSearchParams({token: getToken(), ...params}).toString();
@@ -163,7 +213,8 @@ let syncing = false;
 async function syncNow(manual) {
   if (!db.settings.scriptUrl) { if (manual) toast('Local mode – add the Google Script URL in Settings to sync'); return; }
   if (!navigator.onLine) { if (manual) toast('Offline – everything is queued and will sync later'); return; }
-  if (syncing) return; syncing = true; const url = db.settings.scriptUrl;
+  if (SY.busy) { SY.again = true; if (manual) toast('Already syncing…'); return; }
+  SY.busy = true; syncing = true; clearTimeout(SY.timer); updateStatus(); const url = db.settings.scriptUrl, sig0 = dataSig(); let failed = false;
   try {
     // 1) queued owner setup / sign-ups (no token needed)
     for (const u of db.users.filter(x => x.ownerQueued)) { const r = await postJSON(url, {action: 'owner_setup', username: u.username, name: u.name, salt: u.salt, hash: u.hash, sec_q: u.secQ || '', sec_a: u.secA || '', email: u.email || DEFAULT_OWNER_EMAIL});
@@ -179,26 +230,52 @@ async function syncNow(manual) {
     if (u.profileDirty) { const r = await postJSON(url, {action: 'profile', name: u.name, phone: u.phone || '', email: u.email || '', photo: u.role === 'student' ? undefined : (u.photo || ''), subjects: (u.subjects || []).join('; '), classes: (u.classes || []).join('; ')}); if (r.ok) u.profileDirty = false; }
     // 3a) subjects a teacher added (queued while offline) – before the marks that use them
     if (u.role !== 'student') for (const nm of db.pendingSubjects.slice()) {
-      const r = await postJSON(url, {action: 'add_subject', name: nm, base: db.subjects});
+      const r = await postJSON(url, {action: 'add_subject', name: nm, base: db.subjects, grade: (db.pendingSubjectGrade || {})[nm] || ''});
       if (!r.ok && /unknown action/i.test(r.error || '')) break; // server not updated yet – keep it queued
-      db.pendingSubjects = db.pendingSubjects.filter(x => x !== nm);
-      if (r.ok) { if (r.name && r.name !== nm) renameSubjectLocal(nm, r.name); applySubjectLists(r.subjects_json, r.subject_meta_json); } else toast(r.error); save();
+      db.pendingSubjects = db.pendingSubjects.filter(x => x !== nm); delete (db.pendingSubjectGrade || {})[nm];
+      if (r.ok) { if (r.name && r.name !== nm) renameSubjectLocal(nm, r.name); applySubjectLists(r.subjects_json, r.subject_meta_json); applyClassSubjects(r.class_subjects_json); } else addIssue('Subject "' + nm + '": ' + r.error); save();
+    }
+    // 3b) classes a teacher added (v13 server) – shared with everyone, auto-assigned to the teacher
+    if (u.role !== 'student') for (const c of db.pendingClasses.slice()) {
+      const r = await postJSON(url, {action: 'add_class', grade: c.grade, section: c.section, base: db.classes});
+      if (!r.ok && /unknown action/i.test(r.error || '')) break; // keep queued until the server is updated
+      db.pendingClasses = db.pendingClasses.filter(x => x !== c);
+      if (r.ok) { applyClassList(r.classes_json); const k = r.grade + ' ' + r.section; if (u.role === 'teacher' && u.classes && u.classes.length && !u.classes.includes(k)) u.classes.push(k); }
+      else addIssue(`Class ${c.grade} ${c.section}: ${r.error}`); save();
+    }
+    // 3c) queued student edits that need the server (roll number changes move marks + login)
+    if (u.role !== 'student') for (const op of db.opQueue.slice()) {
+      op.tries = (op.tries || 0) + 1; save();
+      const r = await postJSON(url, op.body);
+      if (r.ok || (op.tries > 1 && /student not found/i.test(r.error || ''))) { db.opQueue = db.opQueue.filter(x => x !== op); save(); continue; } // (retry after a lost answer = already done)
+      if (r.auth) break;
+      revertOp(op, /unknown action/i.test(r.error || '') ? 'needs the updated server (ask the admin to redeploy the Apps Script)' : r.error); db.opQueue = db.opQueue.filter(x => x !== op); save();
     }
     // 3) marks, rosters, deletions, school settings
     if (u.role !== 'student') {
-      const pend = db.tests.filter(t => !t.synced);
+      const pend = db.tests.filter(t => !t.synced), snap = new Map(pend.map(t => [t, JSON.stringify(t)])); // only what was sent is marked synced (edits made meanwhile stay queued)
+      const sentStu = []; if (db.settings.rosterDirty) Object.entries(db.students).forEach(([k, list]) => list.forEach(x => { if (x.isNew || x.dirty) sentStu.push([k, x, JSON.stringify(x)]); }));
       const body = {action: 'push', rows: pend.flatMap(flatRows), test_ids: pend.map(t => t.id), deleted: db.deleted.slice(), deleted_notes: db.deletedNotes.slice()};
       if (db.settings.rosterDirty) body.students = Object.entries(db.students).flatMap(([k, list]) => list.filter(s => s.isNew || s.dirty).map(s => { const n = splitName(s); return {class: splitCk(k).grade, section: splitCk(k).section, roll_no: s.roll, first_name: n.first, last_name: n.last, father_name: s.father || '', student_name: n.full, phone: s.phone || '', new: s.isNew ? 'yes' : ''}; }));
       const delS = db.deletedStudents.slice(); if (delS.length) body.deleted_students = delS.map(k => { const [c, sc, r] = k.split('|'); return {class: c, section: sc, roll_no: r}; });
       if (db.settings.settingsDirty && u.role === 'owner') body.settings = {school_name: db.settings.schoolName, logo: db.settings.logo, honor_limit: db.settings.honorLimit,
         classes_json: JSON.stringify(db.classes), subjects_json: JSON.stringify(db.subjects), teachers_can_announce: db.settings.teachersCanAnnounce, contact_json: JSON.stringify(db.settings.contact || {}),
-        pass_percent: db.settings.passPercent || 40, pass_overrides_json: JSON.stringify(db.settings.passOverrides || {}),
+        pass_percent: db.settings.passPercent || 40, pass_overrides_json: JSON.stringify(db.settings.passOverrides || {}), class_subjects_json: JSON.stringify(db.classSubjects || {}),
         subjects_base: db.settings.lastPull || '', subject_renames: db.settings.subjectRenames || {}};
       const res = await postJSON(url, body);
       if (!res || res.ok === false) throw new Error(res && res.error || 'Script error');
       if (res.forbidden && res.forbidden.length) toast(`⛔ Not allowed for ${res.forbidden.length} test(s) – not your class. Restored from the school copy.`);
-      pend.forEach(t => t.synced = true); db.deleted = db.deleted.filter(id => !body.deleted.includes(id)); db.deletedNotes = db.deletedNotes.filter(id => !body.deleted_notes.includes(id));
-      if (body.settings) { db.settings.settingsDirty = false; db.settings.subjectRenames = {}; } if (body.students) { db.settings.rosterDirty = false; Object.values(db.students).forEach(l => l.forEach(x => { delete x.isNew; delete x.dirty; })); if (res.forbidden_students) toast('Not your class – not saved: ' + res.forbidden_students.join(', ')); if (res.duplicate_students) toast('⛔ Roll number already taken – not added: ' + res.duplicate_students.join(', ')); } if (body.deleted_students) db.deletedStudents = db.deletedStudents.filter(x => !delS.includes(x)); save();
+      pend.forEach(t => { if (JSON.stringify(t) === snap.get(t)) t.synced = true; });
+      if (res.merged) for (const [from, to] of Object.entries(res.merged)) { const t = db.tests.find(x => x.id === from); if (!t) continue; // same date + class + subject already on the server → one test
+        if (db.tests.some(x => x.id === to)) db.tests = db.tests.filter(x => x !== t); else t.id = to; }
+      db.deleted = db.deleted.filter(id => !body.deleted.includes(id)); db.deletedNotes = db.deletedNotes.filter(id => !body.deleted_notes.includes(id));
+      if (body.settings) { db.settings.settingsDirty = false; db.settings.subjectRenames = {}; } if (body.students) { const dupK = new Set((res.duplicate_students || []).concat(res.forbidden_students || []).map(x => x.replace(/ (roll |#)/, '|')));
+        sentStu.forEach(([k, x, js]) => { if (dupK.has(k + '|' + x.roll)) { // refused by the server → not kept as if saved
+            if (x.isNew) db.students[k] = (db.students[k] || []).filter(y => y !== x); else { delete x.dirty; } return; }
+          if (JSON.stringify(x) === js) { delete x.isNew; delete x.dirty; } });
+        db.settings.rosterDirty = Object.values(db.students).some(l => l.some(x => x.isNew || x.dirty));
+        if (res.forbidden_students) addIssue('⛔ Not your class – not saved: ' + res.forbidden_students.join(', '));
+        if (res.duplicate_students) addIssue('⛔ Roll number already taken on the server – not added: ' + res.duplicate_students.join(', ') + '. Add the student again with a free roll number.'); } if (body.deleted_students) db.deletedStudents = db.deletedStudents.filter(x => !delS.includes(x)); save();
       if (db.notes.some(n => !n.synced)) await (await loadMod('notes')).uploadPendingNotes(url);
     }
     if (u.role === 'owner' && db.settings.ttServer !== 'old') { // 3b) timetables (owner) – needs the v11 Apps Script
@@ -211,15 +288,21 @@ async function syncNow(manual) {
     if (db.announcements.some(a => !a.synced) || db.deletedAnn.length) await (await loadMod('ann')).uploadPendingAnn(url);
     if (db.chatQueue.length) await (await loadMod('chat')).flushChat();
     db.settings.lastSync = new Date().toISOString(); save();
-    await pullNow(false);
+    await pullNow(false, true);
     if (manual) toast('Synced ✓');
-  } catch (e) { console.warn('sync failed', e); if (manual) toast('Sync failed: ' + e.message); }
-  finally { syncing = false; updateStatus(); }
+    SY.fails = 0; SY.err = ''; SY.next = pendingCount() ? Date.now() + 60000 : 0; // leftovers (e.g. old server) retried every minute
+  } catch (e) {
+    if (e.epoch) { SY.next = 0; SY.again = true; } // data reset on the server: local copy cleared → sync again with the fresh copy
+    else { failed = true; SY.fails++; SY.err = e.message; SY.next = Date.now() + Math.min(300000, 15000 * 2 ** (SY.fails - 1)); console.warn('sync failed', e); if (manual) toast('Sync failed – will retry: ' + e.message); }
+  }
+  finally { SY.busy = false; syncing = false; updateStatus();
+    if (SY.again && !failed && SY.chain < 1 && navigator.onLine && (pendingCount() || !db.settings.lastPull)) { SY.again = false; SY.chain++; setTimeout(() => syncNow(false), 400); } else { SY.again = false; SY.chain = 0; }
+    if (!manual) rerenderIfChanged(sig0); }
 }
-async function pullNow(manual) {
+async function pullNow(manual, inSync) {
   if (!online() || !getToken()) { if (manual) toast(getToken() ? 'Offline' : 'Log in while online first'); return; }
   try {
-    const res = await getJSON({action: 'pull'});
+    const res = await getJSON({action: 'pull'}); if (res && res.settings && applyEpoch(res.settings.data_epoch)) { /* old copy cleared – fill from the server below */ }
     if (!res.ok) throw new Error(res.error || 'pull failed');
     applyServerSettings(res.settings || {});
     const u = sessionUser();
@@ -229,6 +312,7 @@ async function pullNow(manual) {
     if (res.users) { const names = new Set(res.users.map(x => x.username)); db.users = db.users.filter(x => !x.remote || names.has(x.username)); }
     if (res.students) res.students.forEach(s => { const key = `${s.class} ${s.section}`; const list = db.students[key] = db.students[key] || [];
       const o = {name: s.student_name, first: s.first_name || '', last: s.last_name || '', father: s.father_name || '', addedBy: s.added_by || '', phone: s.phone || ''};
+      if (db.opQueue.some(o => o.cls === key && o.body.old_roll === String(s.roll_no))) return; // roll change still queued
       const ex = list.find(x => x.roll === String(s.roll_no)); if (ex) { if (!ex.dirty && !ex.isNew) for (const k in o) if (o[k]) ex[k] = o[k]; } else list.push({roll: String(s.roll_no), ...o}); });
     if (res.deleted_students) res.deleted_students.forEach(k => { const i = k.lastIndexOf('|'), c = k.slice(0, i), r = k.slice(i + 1); if (db.students[c]) db.students[c] = db.students[c].filter(x => x.roll !== r || x.isNew); });
     if (res.notes) { const remoteIds = new Set(res.notes.map(n => n.note_id));
@@ -242,7 +326,7 @@ async function pullNow(manual) {
     if (res.deleted_rows) db.deletedRows = res.deleted_rows; if (res.audit) db.audit = res.audit;
     db.settings.lastPull = new Date().toISOString(); save(); applyBranding();
     if (manual) { toast('Downloaded latest data ✓'); render(); }
-  } catch (e) { console.warn('pull failed', e); if (manual) toast('Download failed: ' + e.message); }
+  } catch (e) { console.warn('pull failed', e); if (manual) toast('Download failed: ' + e.message); if (inSync) throw e; }
 }
 /* v12: profile pictures – resized on the phone to a ~200px square JPEG (< 30 KB) and kept as a data URL in the Users sheet */
 const initials = u => String((u && (u.name || u.username)) || '?').trim().split(/\s+/).map(x => x[0]).slice(0, 2).join('').toUpperCase();
@@ -299,7 +383,32 @@ function addRosterStudent(f) {
   db.settings.rosterDirty = true; save(); syncNow(false).catch(() => {});
   return {roll, cls};
 }
-function addSubject(raw) {
+/** v13: a teacher (or the owner) adds a class/section – usable at once, queued offline, shared with everyone by the server and assigned to its creator. */
+function addClass(gradeRaw, sectionRaw) {
+  const m = me(); if (!m || !approved(m) || m.role === 'student') throw new Error('Only approved teachers can add classes');
+  const grade = String(gradeRaw || '').replace(/\s+/g, ' ').trim(), section = String(sectionRaw || '').trim().replace(/\s+/g, '-');
+  if (!grade || !section || grade.length > 20 || section.length > 20) throw new Error('Class and section: 1–20 characters each, e.g. 11th / Boys');
+  if (/[;|<>]/.test(grade + section)) throw new Error('Class/section cannot contain ; | < >');
+  const dup = db.classes.find(c => sameClass(c, {grade, section})), c = dup || {grade, section}, key = ck(c);
+  if (!dup) { db.classes.push(c); db.pendingClasses.push({grade, section}); }
+  if (m.role !== 'owner' && m.classes && m.classes.length && !m.classes.includes(key)) m.classes.push(key);
+  save(); return {key, existed: !!dup};
+}
+/** v13: a change of roll number for a student already on the server is queued (works offline) and sent before the class list. A server refusal undoes it locally. */
+function queueStudentUpdate(cls, rec, oldRoll, f, prev) {
+  const {grade: g, section} = splitCk(cls);
+  const ex = db.opQueue.find(o => o.cls === cls && o.body.roll_no === oldRoll); // a second change before it was sent → one op from the original roll
+  const body = {action: 'student_update', class: g, section, old_roll: ex ? ex.body.old_roll : oldRoll, roll_no: f.roll, first_name: f.first, last_name: f.last, father_name: f.father, phone: f.phone};
+  if (ex) { ex.body = body; ex.tries = 0; } else db.opQueue.push({id: uid(), cls, body, prev, label: `${cls} roll ${oldRoll} → ${f.roll}`});
+}
+function revertOp(op, why) {
+  const b = op.body, list = db.students[op.cls] || [], rec = list.find(x => x.roll === b.roll_no);
+  if (rec) { Object.assign(rec, op.prev || {}, {roll: b.old_roll}); delete rec.dirty; }
+  db.tests.filter(t => testCk(t) === op.cls).forEach(t => t.rows.forEach(x => { if (x.roll === b.roll_no) x.roll = b.old_roll; }));
+  db.users.filter(u => u.role === 'student' && u.cls === op.cls && u.roll === b.roll_no).forEach(u => u.roll = b.old_roll);
+  addIssue(`⛔ Not saved: ${op.label} – ${why}. The roll number was changed back.`);
+}
+function addSubject(raw, grade) {
   const m = me(); if (!m || !approved(m)) throw new Error('Only approved teachers can add subjects');
   const name = String(raw || '').replace(/\s+/g, ' ').trim();
   if (!name || name.length > 40) throw new Error('Subject name: 1–40 characters');
@@ -307,21 +416,28 @@ function addSubject(raw) {
   const dup = allSubjects().find(x => x.toLowerCase() === name.toLowerCase());
   const final = dup || name;
   if (!dup) { db.subjects.push(name); db.subjectMeta[name] = {by: m.name, username: m.username, at: new Date().toISOString()};
-    if (m.role === 'owner') db.settings.settingsDirty = true; else db.pendingSubjects.push(name); }
+    if (m.role === 'owner') db.settings.settingsDirty = true; else { db.pendingSubjects.push(name); if (grade) db.pendingSubjectGrade[name] = grade; } }
   else if (!db.subjects.includes(dup)) db.subjects.push(dup);
   if (m.role !== 'owner' && m.subjects && m.subjects.length && !m.subjects.includes(final)) m.subjects.push(final);
   save(); if (!dup) syncNow(false).catch(() => {});
   return {name: final, existed: !!dup};
 }
+function applyClassList(js) { try { const l = JSON.parse(js || ''); if (Array.isArray(l) && l.length) db.classes = l; } catch (e) {}
+  for (const c of db.pendingClasses || []) if (!db.classes.some(x => sameClass(x, c))) db.classes.push({grade: c.grade, section: c.section}); }
+function applyClassSubjects(js) { try { const m = JSON.parse(js || ''); if (m && typeof m === 'object' && !Array.isArray(m) && Object.keys(m).length) db.classSubjects = m; } catch (e) {} }
+const normC = v => String(v || '').trim().toLowerCase().replace(/[\s-]+/g, '');
+const sameClass = (a, b) => normC(a.grade) === normC(b.grade) && normC(a.section) === normC(b.section);
 function applyServerSettings(s) {
+  applyEpoch(s.data_epoch);
   if (db.settings.settingsDirty) return;
+  applyClassSubjects(s.class_subjects_json);
   if (s.school_name) db.settings.schoolName = s.school_name;
   if (s.logo !== undefined) db.settings.logo = s.logo || '';
   if (Number(s.honor_limit) > 0) db.settings.honorLimit = Number(s.honor_limit);
   if (s.teachers_can_announce) db.settings.teachersCanAnnounce = s.teachers_can_announce;
   if (Number(s.pass_percent) > 0) db.settings.passPercent = Number(s.pass_percent);
   try { if (s.pass_overrides_json) db.settings.passOverrides = JSON.parse(s.pass_overrides_json) || {}; } catch (e) {}
-  try { if (s.classes_json) db.classes = JSON.parse(s.classes_json); } catch (e) {}
+  if (s.classes_json) applyClassList(s.classes_json);
   applySubjectLists(s.subjects_json, s.subject_meta_json);
   if (s.report_key) db.settings.reportKey = s.report_key;
   try { if (s.contact_json) db.settings.contact = {...DEFAULT_CONTACT, ...JSON.parse(s.contact_json)}; } catch (e) {}
@@ -369,9 +485,12 @@ function rememberRoster(key, rows, fromServer) {
   roster.sort((a, b) => (parseFloat(a.roll) || 0) - (parseFloat(b.roll) || 0) || String(a.roll).localeCompare(String(b.roll)));
   db.students[key] = roster;
 }
-window.addEventListener('online', () => { updateStatus(); syncNow(false); });
+window.addEventListener('online', () => { SY.fails = 0; SY.next = 0; SY.err = ''; updateStatus(); if (pendingCount()) syncNow(false); else autoPull(); });
 window.addEventListener('offline', updateStatus);
-setInterval(() => { if (pendingCount() && navigator.onLine) syncNow(false); }, 60000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState !== 'visible' || !navigator.onLine) return;
+  if (pendingCount()) { SY.next = 0; syncNow(false); } else if (Date.now() - (Date.parse(db.settings.lastPull || '') || 0) > 30000) autoPull(); });
+document.addEventListener('input', e => { if (e.target && e.target.closest && e.target.closest('#app') && e.target.type !== 'search') STATE.formDirty = true; }, true);
+setInterval(syncTick, 15000);
 
 /* ------------------------------------------------------------------ auth (owner setup, sign-up, login, approvals, password) */
 async function tryServerLogin(username, hash) {
@@ -572,6 +691,7 @@ function go(v, extra) { VIEW = v; if (extra) Object.assign(STATE, extra); if (ha
 const STUDENT_VIEWS = ['shome', 'notes', 'mine', 'card', 'honor', 'chat', 'ann', 'account', 'timetable'];
 const PUBLIC_VIEWS = ['home', 'teacher', 'teacher/register', 'student', 'student/register', 'admin', 'pending'];
 function render() {
+  STATE.formDirty = false;
   if (dashMod) dashMod.destroyCharts(); if (chatMod) chatMod.stopChat(); updateStatus(); applyBranding();
   const u = sessionUser(), ok = approved(u), stu = u && u.role === 'student';
   renderFooter(); renderUserMenu(); $('#nav').classList.toggle('hidden', !u || !ok); $('#menuBtn').classList.toggle('hidden', !u || !ok); $('#pubNav').classList.toggle('hidden', !!(u && ok));
@@ -880,14 +1000,15 @@ function viewEntry() {
   const subjAll = [...new Set(classesAll.flatMap(c => subjectsForClass(c, mySubjects())).concat(fixed ? [fixed.subject] : []))];
   if (!classesAll.length) { app().innerHTML = '<div class="card"><h2>Enter marks</h2><p class="muted">No classes are assigned to you yet – the admin assigns classes.</p></div>'; return; }
   const sub0 = fixed ? fixed.subject : (subjAll.includes(STATE.entrySub) ? STATE.entrySub : subjAll[0]);
-  const clsFor = sb => { const l = classesAll.filter(c => subjectsForClass(c, mySubjects()).includes(sb)); return l.length ? l : classesAll; };
+  const clsFor = sb => { const l = classesAll.filter(c => c === STATE.newCls || subjectsForClass(c, mySubjects()).includes(sb)); return l.length ? l : classesAll; };
   const cls0 = fixed ? testCk(fixed) : (clsFor(sub0).includes(STATE.entryCls) ? STATE.entryCls : clsFor(sub0)[0]);
   app().innerHTML = `<div class="card"><div class="card-h"><h2>${fixed ? '✏️ Edit marks' : 'Enter marks'} <span class="ur">نمبر درج کریں</span></h2>${fixed ? '<button class="btn sm sec" id="cancelEdit">Cancel</button>' : ''}</div>
     <div class="ent-top">
       <div><label>1 · Subject <span class="ur">مضمون</span></label><select id="eSub" ${fixed ? 'disabled' : ''}>${opts(subjAll, sub0)}${fixed ? '' : '<option value="__add">➕ Add subject…</option>'}</select>
         <div id="eSubAdd" class="addsub hidden"><input id="eSubNew" placeholder="New subject, e.g. Computer Science" maxlength="40"><button class="btn sm" id="eSubSave">Add</button><button class="btn sm sec" id="eSubX">✕</button></div></div>
       <div><label>2 · Total marks <span class="ur">کل نمبر</span></label><input type="number" id="eTotal" min="1" inputmode="numeric" value="${fixed ? fixed.total : (STATE.entryTotal || '')}" placeholder="e.g. 25"></div>
-      <div><label>3 · Class <span class="ur">کلاس</span></label><select id="eCls" ${fixed ? 'disabled' : ''}>${opts(clsFor(sub0), cls0)}</select></div>
+      <div><label>3 · Class <span class="ur">کلاس</span></label><select id="eCls" ${fixed ? 'disabled' : ''}>${opts(clsFor(sub0), cls0)}${fixed ? '' : '<option value="__addc">➕ Add class…</option>'}</select>
+        <div id="eClsAdd" class="addsub hidden"><input id="eClsG" placeholder="Class e.g. 11th" maxlength="20"><input id="eClsS" placeholder="Section e.g. Boys" maxlength="20"><button class="btn sm" id="eClsSave">Add</button><button class="btn sm sec" id="eClsX">✕</button></div></div>
       <div class="ent-date"><label>Date <small class="muted">(optional)</small></label><input type="date" id="eDate" value="${fixed ? fixed.date : (STATE.entryDate || today())}" ${fixed ? 'disabled' : ''}></div>
     </div><div id="eExist"></div></div>
   <div class="card"><div class="card-h"><h3>4 · Students <span class="ur">طلبہ</span> <span class="badge" id="eCount"></span></h3><span class="muted">Empty or <b>L</b> = leave · <span class="ur">چھٹی</span></span></div>
@@ -923,16 +1044,20 @@ function viewEntry() {
       n++; sum += o; const pc = total ? o / total * 100 : null; if (pc != null && isPass(pc, subject)) npass++; cell.innerHTML = total ? `${p1(pc)}` : ''; });
     $('#eSummary').innerHTML = total ? `Marks: <b>${n}</b> · Leave/empty: <b>${ab}</b> · Average: <b>${n ? p1(sum / n / total * 100) : '–'}</b> · Pass (≥${passMark(subject)}%): <b class="up">${npass}</b> · Fail: <b class="down">${n - npass}</b>${bad ? ` · <span class="down">${bad} invalid</span>` : ''}` : 'Enter total marks at the top to see percentages.';
   }
-  const refreshCls = () => { const l = clsFor($('#eSub').value), c = $('#eCls').value; $('#eCls').innerHTML = opts(l, l.includes(c) ? c : l[0]); };
+  const refreshCls = () => { const l = clsFor($('#eSub').value), c = $('#eCls').value; $('#eCls').innerHTML = opts(l, l.includes(c) ? c : l[0]) + '<option value="__addc">➕ Add class…</option>'; };
   let prevSub = $('#eSub').value;
   const closeAdd = () => { $('#eSubAdd').classList.add('hidden'); if ($('#eSub').value === '__add') $('#eSub').value = prevSub; };
   $('#eSub').onchange = () => { if ($('#eSub').value === '__add') { $('#eSubAdd').classList.remove('hidden'); $('#eSubNew').focus(); return; } prevSub = STATE.entrySub = $('#eSub').value; closeAdd(); refreshCls(); STATE.entryCls = $('#eCls').value; load(); };
-  $('#eCls').onchange = () => { STATE.entryCls = $('#eCls').value; load(); };
+  let prevCls = $('#eCls').value;
+  $('#eCls').onchange = () => { if ($('#eCls').value === '__addc') { $('#eClsAdd').classList.remove('hidden'); $('#eClsG').focus(); return; } prevCls = STATE.entryCls = $('#eCls').value; $('#eClsAdd').classList.add('hidden'); load(); };
+  if (!fixed) { $('#eClsX').onclick = () => { $('#eClsAdd').classList.add('hidden'); $('#eCls').value = prevCls; };
+    $('#eClsSave').onclick = () => { try { const r = addClass($('#eClsG').value, $('#eClsS').value); STATE.entryCls = STATE.newCls = r.key; STATE.entrySub = $('#eSub').value;
+      toast(r.existed ? `${r.key} already exists – selected it` : `Class ${r.key} added ✓${online() ? '' : ' (will sync when online)'}`); render(); } catch (e) { toast(e.message); } }; }
   $('#eDate').onchange = () => { STATE.entryDate = $('#eDate').value; load(); };
   $('#eTotal').oninput = recalc;
   if (!fixed) {
     $('#eSubX').onclick = closeAdd; $('#eSubNew').onkeydown = e => { if (e.key === 'Enter') $('#eSubSave').click(); };
-    $('#eSubSave').onclick = () => { try { const r = addSubject($('#eSubNew').value); const s = $('#eSub');
+    $('#eSubSave').onclick = () => { try { const r = addSubject($('#eSubNew').value, splitCk($('#eCls').value).grade); const s = $('#eSub');
         { const g = splitCk($('#eCls').value).grade; const m = (db.classSubjects || {})[g]; if (m && !m.includes(r.name)) { m.push(r.name); save(); } }
         if (![...s.options].some(o => o.value === r.name)) s.insertBefore(new Option(r.name, r.name), s.querySelector('option[value="__add"]'));
         s.value = r.name; prevSub = STATE.entrySub = r.name; $('#eSubNew').value = ''; $('#eSubAdd').classList.add('hidden'); load();
@@ -1078,6 +1203,7 @@ $('#userBtn').onclick = e => { e.stopPropagation(); renderUserMenu(); const d = 
 document.addEventListener('click', e => { if (!e.target.closest('#umenuWrap')) closeUserMenu(); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeUserMenu(); $('#modal').classList.add('hidden'); } });
 $('#bell').onclick = () => go('ann');
+$('#netStatus').onclick = () => { SY.next = 0; syncNow(true); };
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(e => console.warn('SW', e));
 VIEW = hashView() || 'home';
 async function boot() {
@@ -1092,7 +1218,7 @@ async function boot() {
 }
 boot();
 
-export {avatarHTML, classRoster, findTest, db, $, $$, esc, uid, ymd, parseD, addDays, today, fmtD, pct, p1, r1, grade, gradeBadge, toast, weekRange, monthRange, daysBetween,
+export {addClass, queueStudentUpdate, addIssue, sameClass, avatarHTML, classRoster, findTest, db, $, $$, esc, uid, ymd, parseD, addDays, today, fmtD, pct, p1, r1, grade, gradeBadge, toast, weekRange, monthRange, daysBetween,
   save, ck, splitCk, testCk, me, isAdmin, isOwner, myClasses, canEditTest, mySubjects, allClassKeys, allSubjects, applyBranding, testsIn, classAvg, go, STATE,
   render, app, opts, meStudent, sessionUser, updateNotesBadge, postJSON, getJSON, hashPw, logout, chipsHTML, bindChips, download, toCSV, flatRows, syncNow, pullNow, pendingCount,
   DEFAULT_NAME, rememberRoster, setUserStatus, adminResetPassword, adminSetEmail, fullName, splitName, contactHTML, SEC_QS, isLeave, backupHTML, bindBackup, backupJSON, exportCSV, online, getToken, annFor, annUnread, annVisible, updateBell, bindAnnFiles,

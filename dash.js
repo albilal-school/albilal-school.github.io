@@ -2,7 +2,7 @@
    Loaded only when a dashboard/report screen is opened. Chart.js (vendored, MIT) is loaded on demand too. */
 import {db, $, $$, esc, ymd, parseD, addDays, today, fmtD, pct, p1, r1, grade, gradeBadge, toast, weekRange, monthRange, daysBetween,
   save, ck, splitCk, testCk, me, isAdmin, myClasses, allClassKeys, allSubjects, applyBranding, testsIn, classAvg, go, STATE,
-  render, app, opts, download, DEFAULT_NAME, setUserStatus, backupHTML, bindBackup, online, getJSON, sessionUser, isOwner, adminResetPassword, adminSetEmail, fullName, SEC_QS, newPin, rememberRoster, meStudent, annFor, tilesHTML, addSubject, renameSubjectLocal, addRosterStudent, passMark, isPass, passBadge, splitName, postJSON, pullNow, honorMiniHTML, classRoster, avatarHTML} from './app.js';
+  render, app, opts, download, DEFAULT_NAME, setUserStatus, backupHTML, bindBackup, online, getJSON, sessionUser, isOwner, adminResetPassword, adminSetEmail, fullName, SEC_QS, newPin, rememberRoster, meStudent, annFor, tilesHTML, addSubject, renameSubjectLocal, addRosterStudent, passMark, isPass, passBadge, splitName, postJSON, pullNow, honorMiniHTML, classRoster, avatarHTML, addClass, queueStudentUpdate, addIssue, sameClass} from './app.js';
 
 let chartP = null;
 function ensureChart() {
@@ -141,7 +141,8 @@ function myStudentsCardHTML() {
   const acct = r => db.users.find(u => u.role === 'student' && u.cls === c && u.roll === r);
   const ed = STATE.msEdit ? list.find(x => x.roll === STATE.msEdit) : null; if (!ed) STATE.msEdit = '';
   return `<div class="card" id="myStuCard"><div class="card-h"><h2>🎓 Class Students <span class="ur">کلاس کے طلبہ</span></h2><span class="badge">${list.length} in ${esc(c)}</span></div>
-    <div class="row"><div><label>Class</label><select id="msCls">${opts(cls, c)}</select></div><div><label>Search</label><input id="msQ" type="search" placeholder="🔍 Name, roll, father or contact no"></div></div>
+    <div class="row"><div><label>Class</label><select id="msCls">${opts(cls, c)}<option value="__addc">➕ Add class…</option></select>
+      <div id="msClsAdd" class="addsub hidden"><input id="msClsG" placeholder="Class e.g. 11th" maxlength="20"><input id="msClsS" placeholder="Section e.g. Boys" maxlength="20"><button class="btn sm" id="msClsSave">Add</button><button class="btn sm sec" id="msClsX">✕</button></div></div><div><label>Search</label><input id="msQ" type="search" placeholder="🔍 Name, roll, father or contact no"></div></div>
     <div class="card" style="background:#f6faf8" id="msForm"><h3>${ed ? `✏️ Edit roll ${esc(ed.roll)} – ${esc(c)}` : '➕ Add a student'}</h3>
       <div class="row"><div><label>Roll Number *</label><input id="msRoll" inputmode="numeric" value="${ed ? esc(ed.roll) : ''}">${ed ? '<small class="muted">Change only if wrong – must be unique in the class; old marks move to the new roll.</small>' : ''}</div><div><label>Class &amp; section *</label><select id="msCls2" ${ed ? 'disabled' : ''}>${opts(cls, c)}</select></div></div>
       <div class="row"><div><label>First Name *</label><input id="msFirst" value="${ed ? esc(ed.first || splitName(ed).first) : ''}"></div><div><label>Last Name *</label><input id="msLast" value="${ed ? esc(ed.last ?? splitName(ed).last) : ''}"></div></div>
@@ -155,7 +156,10 @@ function myStudentsCardHTML() {
 }
 function bindMyStudents() {
   if (!$('#myStuCard')) return; const c = STATE.myStuCls; labelPtbls();
-  $('#msCls').onchange = e => { STATE.myStuCls = e.target.value; STATE.msEdit = ''; render(); };
+  $('#msCls').onchange = e => { if (e.target.value === '__addc') { $('#msClsAdd').classList.remove('hidden'); $('#msClsG').focus(); return; } STATE.myStuCls = e.target.value; STATE.msEdit = ''; render(); };
+  $('#msClsX').onclick = () => { $('#msClsAdd').classList.add('hidden'); $('#msCls').value = c; };
+  $('#msClsSave').onclick = () => { try { const r = addClass($('#msClsG').value, $('#msClsS').value); STATE.myStuCls = r.key; STATE.msEdit = '';
+    toast(r.existed ? `${r.key} already exists – selected it` : `Class ${r.key} added ✓${navigator.onLine ? '' : ' (will sync when online)'}`); render(); } catch (err) { toast(err.message); } };
   const qf = () => { const q = ($('#msQ').value || '').trim().toLowerCase(); $$('#msTbl tr[data-q]').forEach(r => r.classList.toggle('hidden', !!q && !q.split(/\s+/).every(w => r.dataset.q.includes(w)))); };
   $('#msQ').oninput = qf;
   if ($('#msAdd')) $('#msAdd').onclick = () => { try { const r = addRosterStudent({roll: $('#msRoll').value, first: $('#msFirst').value, last: $('#msLast').value, father: $('#msFather').value, phone: $('#msPhone').value, cls: $('#msCls2').value});
@@ -169,17 +173,14 @@ function bindMyStudents() {
     if (roll !== oldRoll) { // v12: roll numbers are unique per class (class list + registered accounts)
       const taken = (db.students[c] || []).find(x => x !== rec && x.roll === roll) || db.users.find(u => u.role === 'student' && u.cls === c && u.roll === roll && u.status !== 'rejected' && !(u.roll === oldRoll));
       if (taken) return toast(`⛔ Roll ${roll} is already used in ${c} by ${fullName(taken) || taken.name}`);
-      if (!rec.isNew) { // already on the server → change it there first (moves marks + login account too)
-        if (!online()) return toast('Changing a roll number needs internet');
-        const {grade: g, section} = splitCk(c); const btn = $('#msSave'); btn.disabled = true;
-        try { const r = await postJSON(db.settings.scriptUrl, {action: 'student_update', class: g, section, old_roll: oldRoll, roll_no: roll, first_name: first, last_name: last, father_name: father, phone});
-          if (!r.ok) throw new Error(/unknown action/i.test(r.error || '') ? 'Changing a roll number needs the updated server – ask the admin to redeploy the Apps Script (v12).' : r.error);
-        } catch (e) { btn.disabled = false; return toast('⛔ ' + e.message); } }
+      // v13: on the server already → queued roll change (works offline; sent automatically; the server moves marks + login and re-checks uniqueness)
+      if (!rec.isNew) queueStudentUpdate(c, rec, oldRoll, {roll, first, last, father, phone}, {first: rec.first, last: rec.last, father: rec.father, phone: rec.phone, name: rec.name});
       db.tests.filter(t => testCk(t) === c).forEach(t => t.rows.forEach(x => { if (x.roll === oldRoll) { x.roll = roll; if (rec.isNew) t.synced = false; } }));
       db.users.filter(u => u.role === 'student' && u.cls === c && u.roll === oldRoll).forEach(u => u.roll = roll);
     }
-    Object.assign(rec, {roll, first, last, father, phone, name: `${first} ${last}`, dirty: true}); db.settings.rosterDirty = true; STATE.msEdit = ''; save();
-    toast(roll !== oldRoll ? `Student updated ✓ – roll ${oldRoll} → ${roll}` : 'Student updated ✓'); window.syncNow(false); STATE.scrollTo = 'myStuCard'; render(); };
+    const viaOp = roll !== oldRoll && !rec.isNew; // name/father/contact travel with the queued roll change
+    Object.assign(rec, {roll, first, last, father, phone, name: `${first} ${last}`}, viaOp ? {} : {dirty: true}); if (!viaOp) db.settings.rosterDirty = true; STATE.msEdit = ''; save();
+    toast((roll !== oldRoll ? `Student updated ✓ – roll ${oldRoll} → ${roll}` : 'Student updated ✓') + (online() ? '' : ' · saved offline, syncs automatically')); STATE.scrollTo = 'myStuCard'; render(); };
   if ($('#msCancel')) $('#msCancel').onclick = () => { STATE.msEdit = ''; render(); };
   $$('[data-msed]').forEach(b => b.onclick = () => { STATE.msEdit = b.dataset.msed; STATE.scrollTo = 'msForm'; render(); });
   $$('[data-msdel]').forEach(b => b.onclick = () => { const r = b.dataset.msdel, rec = (db.students[c] || []).find(x => x.roll === r); if (!rec) return;
@@ -487,6 +488,9 @@ export async function viewAdmin() {
     <div class="row"><div><label>Email</label><input id="cEmail" value="${esc((db.settings.contact || {}).email || '')}"></div><div><label>Address</label><input id="cAddr" value="${esc((db.settings.contact || {}).address || '')}"></div></div>
     <p class="muted">Saved to the “Settings” tab of the Google Sheet and copied to every device on its next sync.</p>
     <button class="btn" id="aSave">Save school settings</button><button class="btn sec" id="aReset">Reset logo</button></div>
+  <div class="card danger-card"><h2>🧹 Reset all school data <span class="ur">تمام ڈیٹا صاف کریں</span></h2>
+    <p>Deletes <b>all</b> students, teachers, pending requests, marks, timetables, chat, notes, announcements and change history on the server. Only your admin login and these school settings stay; the class list is set to 2nd–10th (Boys / Girls). Every phone clears its old copy on its next sync, so nothing old comes back.</p>
+    <label>Type <b>DELETE ALL</b> to confirm</label><input id="rstTxt" autocomplete="off" placeholder="DELETE ALL"><button class="btn red" id="rstGo" style="margin-top:8px">Reset all data</button></div>
 `;
   else main = shareHTML() + backupHTML();
   app().innerHTML = `<div class="admin-layout">${side}<div class="admin-main" id="adminMain">${main}${['teachers', 'students'].includes(sec) ? peopleBoxesHTML() : ''}</div></div>`;
@@ -502,6 +506,10 @@ export async function viewAdmin() {
     img.onload = () => { const c = document.createElement('canvas'), S = 128, k = Math.min(S / img.width, S / img.height); c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
       c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); newLogo = c.toDataURL('image/png'); if (newLogo.length > 45000) newLogo = c.toDataURL('image/jpeg', .8); $('#aLogoPrev').src = newLogo; URL.revokeObjectURL(img.src); };
     img.src = URL.createObjectURL(f); };
+  $('#rstGo').onclick = async () => { if ($('#rstTxt').value.trim() !== 'DELETE ALL') return toast('Type DELETE ALL to confirm');
+    if (!online()) return toast('Connect to the internet to reset'); if (!confirm('Delete ALL school data on the server? This cannot be undone.')) return;
+    try { const r = await postJSON(db.settings.scriptUrl, {action: 'reset_data', confirm: 'DELETE ALL'}); if (!r.ok) throw new Error(/unknown action/i.test(r.error || '') ? 'needs the updated Apps Script (v13) – redeploy it first' : r.error);
+      toast('All school data deleted ✓'); await pullNow(false); render(); } catch (e) { if (!e.epoch) toast('⛔ Reset failed: ' + e.message); else render(); } };
   $('#aReset').onclick = () => { newLogo = ''; $('#aLogoPrev').src = 'icons/icon-192.png'; };
   $('#aSave').onclick = () => { db.settings.schoolName = $('#aName').value.trim() || DEFAULT_NAME; db.settings.honorLimit = Math.max(1, Math.min(20, parseInt($('#aHonor').value) || 7)); db.settings.passPercent = Math.max(1, Math.min(100, parseFloat($('#aPass').value) || 40)); db.settings.teachersCanAnnounce = $('#aTAnn').checked ? 'yes' : 'no'; db.settings.contact = {whatsapp_name: $('#cWaName').value.trim(), phone: $('#cPhone').value.trim(), whatsapp: $('#cWa').value.trim(), email: $('#cEmail').value.trim(), address: $('#cAddr').value.trim()}; if (newLogo !== null) db.settings.logo = newLogo;
     db.settings.settingsDirty = true; save(); applyBranding(); toast('School settings saved ✓'); window.syncNow(false); };
@@ -707,6 +715,8 @@ function listsHTML() {
     <p class="muted">Add as many as you need (e.g. 9th / Boys, 10th / Girls-B, 1st Year / Science). Synced to every phone.</p>
     <div class="grid2"><div><h3>Classes</h3><div id="lCls">${db.classes.map(c => clsRow(c.grade, c.section)).join('')}</div><button class="btn sec sm" id="lAddCls">＋ Add class</button></div>
     <div><h3>Subjects</h3><p class="muted">Teachers can add subjects; only you can rename or delete them.</p><div id="lSub">${db.subjects.map(subRow).join('')}</div><button class="btn sec sm" id="lAddSub">＋ Add subject</button></div></div>
+    <h3>Subjects per class <span class="ur">ہر کلاس کے مضامین</span></h3><p class="muted">Comma-separated. Empty = every subject above (e.g. 9th / 10th matric subjects).</p>
+    <div id="lCS">${[...new Set(db.classes.map(c => c.grade))].map(g => `<div class="lrow"><b style="min-width:60px">${esc(g)}</b><input class="lcs" data-g="${esc(g)}" value="${esc(((db.classSubjects || {})[g] || []).join(', '))}" placeholder="all subjects"></div>`).join('')}</div>
     <button class="btn" id="lSave">Save classes &amp; subjects</button></div>`;
 }
 const clsRow = (g, s) => `<div class="lrow"><input class="lg" placeholder="Class e.g. 9th" value="${esc(g)}"><input class="ls" placeholder="Section e.g. Boys" value="${esc(s)}"><button class="btn sm red" data-lrm>✕</button></div>`;
@@ -727,6 +737,8 @@ function bindLists() {
     const prevRen = db.settings.subjectRenames || {}; for (const k in prevRen) if (ren[prevRen[k]]) prevRen[k] = ren[prevRen[k]];
     for (const [o, v] of Object.entries(ren)) { renameSubjectLocal(o, v); prevRen[o] = v; } db.settings.subjectRenames = prevRen;
     for (const k of Object.keys(db.subjectMeta)) if (!sb.includes(k)) delete db.subjectMeta[k];
+    const csm = {}; $$('#lCS .lcs').forEach(i => { const l = i.value.split(',').map(x => x.trim()).filter(Boolean).map(x => sb.find(y => y.toLowerCase() === x.toLowerCase()) || x); if (l.length) csm[i.dataset.g] = [...new Set(l)]; });
+    for (const l of Object.values(csm)) for (const x of l) if (!sb.includes(x)) sb.push(x); db.classSubjects = csm;
     db.settings.passOverrides = po; db.classes = cl; db.subjects = sb; db.settings.settingsDirty = true; save(); toast(`Saved ${cl.length} classes, ${sb.length} subjects ✓`); window.syncNow(false); render(); };
 }
 const APP_URL = 'https://albilal-school.github.io/';

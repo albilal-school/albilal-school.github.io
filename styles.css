@@ -405,3 +405,11 @@ tr.tt-brk td{background:#fff3d6;font-weight:600;color:#7a5200}
 .ppick{display:flex;align-items:center;gap:12px;margin:4px 0 8px}.ppick .btn{margin:0 6px 4px 0}
 .req-h{gap:10px}.ptbl td.pname .avatar{margin-right:6px}
 .req-h .req-name{flex:1;min-width:0}
+/* v13 auto-sync status + notices */
+#netStatus{cursor:pointer;white-space:nowrap}
+.pill.busy{background:#1565c0}.pill.pend{background:#b26a00}
+.sync-issues{max-width:1100px;margin:10px auto 0;padding:10px 12px;background:#fff8e1;border:1px solid #f0c36d;border-radius:10px;display:flex;gap:10px;align-items:flex-start;font-size:14px}
+.sync-issues>div{flex:1;min-width:0}.sync-issues small{display:inline-block}
+.danger-card{border:1px solid #f3b1ac;background:#fff7f6}.danger-card input{max-width:260px}
+.addsub input{min-width:0}
+@media (max-width:400px){#netStatus{max-width:170px;overflow:hidden;text-overflow:ellipsis}}
