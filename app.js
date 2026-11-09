@@ -256,7 +256,7 @@ async function syncNow(manual) {
       const pend = db.tests.filter(t => !t.synced), snap = new Map(pend.map(t => [t, JSON.stringify(t)])); // only what was sent is marked synced (edits made meanwhile stay queued)
       const sentStu = []; if (db.settings.rosterDirty) Object.entries(db.students).forEach(([k, list]) => list.forEach(x => { if (x.isNew || x.dirty) sentStu.push([k, x, JSON.stringify(x)]); }));
       const body = {action: 'push', rows: pend.flatMap(flatRows), test_ids: pend.map(t => t.id), deleted: db.deleted.slice(), deleted_notes: db.deletedNotes.slice()};
-      if (db.settings.rosterDirty) body.students = Object.entries(db.students).flatMap(([k, list]) => list.filter(s => s.isNew || s.dirty).map(s => { const n = splitName(s); return {class: splitCk(k).grade, section: splitCk(k).section, roll_no: s.roll, first_name: n.first, last_name: n.last, father_name: s.father || '', student_name: n.full, phone: s.phone || '', new: s.isNew ? 'yes' : ''}; }));
+      if (db.settings.rosterDirty) body.students = Object.entries(db.students).flatMap(([k, list]) => list.filter(s => s.isNew || s.dirty).map(s => { const n = splitName(s); return {class: splitCk(k).grade, section: splitCk(k).section, roll_no: s.roll, first_name: n.first, last_name: n.last, father_name: s.father || '', student_name: n.full, phone: s.phone || '', new: s.isNew ? 'yes' : '', ...(s.login ? {login: s.login} : {})}; }));
       const delS = db.deletedStudents.slice(); if (delS.length) body.deleted_students = delS.map(k => { const [c, sc, r] = k.split('|'); return {class: c, section: sc, roll_no: r}; });
       if (db.settings.settingsDirty && u.role === 'owner') body.settings = {school_name: db.settings.schoolName, logo: db.settings.logo, honor_limit: db.settings.honorLimit,
         classes_json: JSON.stringify(db.classes), subjects_json: JSON.stringify(db.subjects), teachers_can_announce: db.settings.teachersCanAnnounce, contact_json: JSON.stringify(db.settings.contact || {}),
@@ -272,6 +272,10 @@ async function syncNow(manual) {
       if (body.settings) { db.settings.settingsDirty = false; db.settings.subjectRenames = {}; } if (body.students) { const dupK = new Set((res.duplicate_students || []).concat(res.forbidden_students || []).map(x => x.replace(/ (roll |#)/, '|')));
         sentStu.forEach(([k, x, js]) => { if (dupK.has(k + '|' + x.roll)) { // refused by the server → not kept as if saved
             if (x.isNew) db.students[k] = (db.students[k] || []).filter(y => y !== x); else { delete x.dirty; } return; }
+          if (x.login) { const lr = (res.logins || []).find(l => l.key === k + '|' + x.roll); // v14: student login sent with the roster
+            if (lr && !lr.ok) addIssue(`Login for roll ${x.roll} (${k}) not created: ${lr.error}. Set it again in Class Students / Admin ▸ Students.`);
+            else if (!lr && !res.logins) addIssue(`Login for roll ${x.roll} (${k}) not created – the server needs the updated Apps Script (v14).`);
+            const lj = JSON.stringify(x.login); delete x.login; if (js.includes(lj)) js = js.replace(',"login":' + lj, ''); }
           if (JSON.stringify(x) === js) { delete x.isNew; delete x.dirty; } });
         db.settings.rosterDirty = Object.values(db.students).some(l => l.some(x => x.isNew || x.dirty));
         if (res.forbidden_students) addIssue('⛔ Not your class – not saved: ' + res.forbidden_students.join(', '));
@@ -379,9 +383,10 @@ function addRosterStudent(f) {
   const list = db.students[cls] = db.students[cls] || [];
   if (list.some(x => x.roll === roll) || db.users.some(u => u.role === 'student' && u.cls === cls && u.roll === roll && u.status !== 'rejected'))
     throw new Error(`Roll ${roll} already exists in ${cls}`);
-  list.push({roll, first, last, father, phone, name: `${first} ${last}`, addedBy: m.role === 'owner' ? 'admin' : m.name, isNew: true});
+  let login; if (f.username || f.password) { const un = checkStudentLogin(f.username, f.password, cls, roll); login = loginPayload(un, f.password, true); } // v14: student portal login, sent with the roster (works offline)
+  list.push({roll, first, last, father, phone, name: `${first} ${last}`, addedBy: m.role === 'owner' ? 'admin' : m.name, isNew: true, ...(login ? {login} : {})});
   db.settings.rosterDirty = true; save(); syncNow(false).catch(() => {});
-  return {roll, cls};
+  return {roll, cls, username: login ? login.username : ''};
 }
 /** v13: a teacher (or the owner) adds a class/section – usable at once, queued offline, shared with everyone by the server and assigned to its creator. */
 function addClass(gradeRaw, sectionRaw) {
@@ -494,8 +499,8 @@ setInterval(syncTick, 15000);
 
 /* ------------------------------------------------------------------ auth (owner setup, sign-up, login, approvals, password) */
 async function tryServerLogin(username, hash) {
-  const r = await postJSON(db.settings.scriptUrl, {action: 'login', username, hash});
-  const u = db.users.find(x => x.username === username);
+  const u = db.users.find(x => x.username === username), w = u && u.role === 'student' && u.cls ? {class: splitCk(u.cls).grade, section: splitCk(u.cls).section} : {}; // v14: students log in with class + section
+  const r = await postJSON(db.settings.scriptUrl, {action: 'login', username, hash, ...w});
   if (r.ok) { localStorage.setItem(TOKEN_KEY, r.token); if (u) Object.assign(u, userFromServer(r.user, u), {remote: false}); save(); }
   else if (r.status && u) { u.status = r.status; save(); }
   return r;
@@ -505,15 +510,15 @@ const normAns = v => String(v || '').replace(/\s+/g, ' ').trim().toLowerCase();
 const ansHash = v => sha256('ans:' + normAns(v)); // hashed on the phone; the server hashes again with the username
 const splitName = o => { if (o.first || o.last) return {first: o.first || '', last: o.last || '', full: fullName(o)}; const p = String(o.name || '').trim().split(/\s+/); return {first: p[0] || '', last: p.slice(1).join(' '), full: p.join(' ')}; };
 const fullName = (o = {}) => ((o.first || '') + ' ' + (o.last || '')).replace(/\s+/g, ' ').trim() || o.name || '';
-function findLocalByIdent(ident, cls) {
+function findLocalByIdent(ident, cls, strict) { // strict (login): a student must match the chosen class too
   const id = ident.trim().toLowerCase();
-  return db.users.find(x => x.username === id && x.hash) ||
-    db.users.find(x => x.role === 'student' && x.hash && String(x.roll).toLowerCase() === id && (!cls || x.cls === cls));
+  return db.users.find(x => x.username === id && x.hash && (!strict || x.role !== 'student' || x.cls === cls)) ||
+    db.users.find(x => x.role === 'student' && x.hash && String(x.roll).toLowerCase() === id && ((!strict && !cls) || x.cls === cls));
 }
-// identifier = username OR roll number; cls only needed when that roll number exists in more than one class
+// v14: staff log in with their username; students ALWAYS choose class + section and type their roll number or username (a roll number repeats in other classes)
 async function login(ident, pass, cls) {
   ident = ident.trim().toLowerCase(); if (!ident || !pass) throw new Error('Enter username / roll number and password');
-  let local = findLocalByIdent(ident, cls);
+  let local = findLocalByIdent(ident, cls, true);
   if (online()) {
     try {
       const where = cls ? {class: splitCk(cls).grade, section: splitCk(cls).section} : {};
@@ -522,7 +527,7 @@ async function login(ident, pass, cls) {
       const username = s.username, hash = hashPw(pass, s.salt);
       local = db.users.find(x => x.username === username);
       if (!local) { local = {id: uid(), username, role: 'teacher'}; db.users.push(local); }
-      const r = await postJSON(db.settings.scriptUrl, {action: 'login', username, hash});
+      const r = await postJSON(db.settings.scriptUrl, {action: 'login', username, hash, ...where});
       if (!r.ok && !r.status) throw Object.assign(new Error(r.error), {server: true});
       Object.assign(local, {salt: s.salt, hash, remote: false});
       if (r.ok) { localStorage.setItem(TOKEN_KEY, r.token); Object.assign(local, userFromServer(r.user, local), {mustChange: !!r.must_change}); }
@@ -530,7 +535,8 @@ async function login(ident, pass, cls) {
       localStorage.setItem(SES_KEY, local.id); save(); return local;
     } catch (e) { if (e.server) throw e; console.warn('server login failed, trying offline', e); }
   }
-  if (!local || local.hash !== hashPw(pass, local.salt)) throw new Error('Wrong username / roll number or password');
+  if (!local && !cls && !db.users.some(x => x.username === ident && x.role !== 'student')) throw new Error('choose_class: choose your class and section');
+  if (!local || local.hash !== hashPw(pass, local.salt)) throw new Error('Wrong class, roll number / username or password');
   localStorage.setItem(SES_KEY, local.id); return local;
 }
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/, DEFAULT_OWNER_EMAIL = 'jonaskhan05@gmail.com';
@@ -610,6 +616,28 @@ async function adminResetPassword(username, temp, force) { // OWNER ONLY
     const r = await postJSON(db.settings.scriptUrl, {action: 'admin_reset', username, salt, hash, force_change: !!force}); if (!r.ok) throw new Error(r.error); }
   const u = db.users.find(x => x.username === username); if (u) Object.assign(u, {salt, hash, mustChange: !!force}); save();
 }
+/* v14: student portal logins – username + password for a class/roll (teacher-added students too) */
+const suggestStudentUsername = (cls, roll) => (String(cls || '').toLowerCase().replace(/[^a-z0-9]+/g, '') + '-' + String(roll || '').toLowerCase().replace(/[^a-z0-9]+/g, '')).slice(0, 30);
+const tempPassword = () => 'Stu-' + String(1000 + (crypto.getRandomValues(new Uint32Array(1))[0] % 9000)) + 'abcdefghjkmnpqrstuvwxyz'[crypto.getRandomValues(new Uint8Array(1))[0] % 23];
+function checkStudentLogin(username, password, cls, roll) { // phone-side checks; the server checks again (unique username, class rights)
+  const un = String(username || '').trim().toLowerCase();
+  if (!/^[a-z0-9_.-]{3,30}$/.test(un) || !/[a-z]/.test(un)) throw new Error('Username: 3-30 letters, numbers, _ . - (at least one letter, no spaces)');
+  if (String(password || '').length < 6) throw new Error('Password: at least 6 characters');
+  const other = db.users.find(x => x.username === un); if (other && !(other.role === 'student' && other.cls === cls && String(other.roll) === String(roll))) throw new Error(`Username "${un}" is already taken – choose another`);
+  return un;
+}
+function loginPayload(username, password, force = true) { const salt = newSalt(); return {username, salt, hash: hashPw(password, salt), force_change: !!force}; }
+/** Owner: set / reset any student's username + password (creates the login if there is none). Teacher: create a missing login in their class. Online only. */
+async function setStudentLogin({cls, roll, username, password, force = true}) {
+  const m = me(); if (!m || !approved(m)) throw new Error('Only the admin or the class teacher can do this');
+  if (!db.settings.scriptUrl) throw new Error('Online sync is not set up'); if (!online()) throw new Error('Connect to the internet to set a student login');
+  const un = checkStudentLogin(username, password, cls, roll), c = splitCk(cls), lp = loginPayload(un, password, force);
+  const r = await postJSON(db.settings.scriptUrl, {action: 'student_login_set', class: c.grade, section: c.section, roll_no: String(roll), ...lp});
+  if (!r.ok) throw new Error(/unknown action/i.test(r.error || '') ? 'The server needs the updated Apps Script (v14) – ask the admin to redeploy it' : r.error);
+  const old = db.users.find(x => x.role === 'student' && x.cls === cls && String(x.roll) === String(roll) && x.status !== 'rejected');
+  if (old) Object.assign(old, {username: r.username, status: r.status || old.status, mustChange: !!force, salt: lp.salt, hash: lp.hash, remote: old.remote});
+  save(); await pullNow(false).catch(() => {}); return r;
+}
 async function setUserStatus(username, status) { // OWNER ONLY
   if (!isOwner()) return toast('Only the owner can approve');
   const u = db.users.find(x => x.username === username); if (!u) return;
@@ -626,7 +654,7 @@ async function changePassword(oldPw, newPw) {
     const r = await postJSON(db.settings.scriptUrl, {action: 'change_password', old_hash: hashPw(oldPw, u.salt), salt, hash}); if (!r.ok) throw new Error(r.error); }
   Object.assign(u, {salt, hash, mustChange: false}); save();
 }
-function doLogout(all) { const tok = getToken();
+function doLogout(all) { const tok = getToken(); STATE.credSlip = null; STATE.slKey = ''; STATE.msLogin = '';
   if (online() && tok) postJSON(db.settings.scriptUrl, {action: all ? 'logout_all' : 'logout'}).catch(() => {});
   localStorage.removeItem(SES_KEY); localStorage.removeItem(TOKEN_KEY); STATE.lastLogin = ''; closeUserMenu(); toast(all ? 'Logged out from all devices ✓' : 'Logged out ✓'); go('home'); }
 /** Log out: unsynced items stay saved on this phone (they sync after the next login) – warn and offer "Sync now" first. */
@@ -848,9 +876,11 @@ function viewRoleLogin(role, register) {
       <button class="btn big" id="doReg">Register as teacher</button>
       <p class="auth-switch">Already registered? <a href="#/teacher" id="toLogin">Log in here</a></p>`;
   else form = `<h2>${c.title}</h2>
-      <label>${role === 'student' ? 'Roll Number or Username <span class="ur">رول نمبر یا یوزر نیم</span>' : role === 'admin' ? 'Admin username <span class="ur">یوزر نیم</span>' : 'Username <span class="ur">یوزر نیم</span>'}</label>
-      <input id="lUser" autocomplete="username" autocapitalize="none" ${role === 'student' ? 'placeholder="e.g. 12 or hamza"' : ''}>
-      <div id="lClsBox" class="${STATE.needCls ? '' : 'hidden'}"><label>Your class (this roll number is used in more than one class)</label><select id="lCls">${opts(cls, '', '— choose class —')}</select></div>
+      ${role === 'student' ? `<label for="lCls">Class &amp; section <span class="ur">کلاس اور سیکشن</span> *</label><select id="lCls" required>${opts(cls, STATE.lastStuCls && cls.includes(STATE.lastStuCls) ? STATE.lastStuCls : '', '— choose your class —')}</select>
+      <small class="muted login-hint">Roll numbers repeat in different classes, so choose your own class first.</small>` : ''}
+      <label for="lUser">${role === 'student' ? 'Roll Number or Username <span class="ur">رول نمبر یا یوزر نیم</span>' : role === 'admin' ? 'Admin username <span class="ur">یوزر نیم</span>' : 'Username <span class="ur">یوزر نیم</span>'}</label>
+      <input id="lUser" autocomplete="username" autocapitalize="none" ${role === 'student' ? 'placeholder="e.g. 12 or 9thboys-12"' : ''}>
+      ${role === 'student' ? '' : `<div id="lClsBox" class="${STATE.needCls ? '' : 'hidden'}"><label>Your class (student accounts log in with their class)</label><select id="lCls">${opts(cls, '', '— choose class —')}</select></div>`}
       <label>Password <span class="ur">پاس ورڈ</span></label><input id="lPass" type="password" autocomplete="current-password">
       <button class="btn big" id="doLogin">Log in</button>
       <div class="auth-links"><a href="#/forgot" id="fpLink">Forgot password? <span class="ur">پاس ورڈ بھول گئے</span></a></div>
@@ -873,11 +903,13 @@ function viewRoleLogin(role, register) {
     await signUp(f); STATE.regPhoto = ''; go('pending');
   });
   else $('#doLogin').onclick = e => busy(e.target, async () => {
+    if (role === 'student' && !$('#lCls').value) { $('#lCls').focus(); throw new Error('Choose your class & section first'); }
+    if (role === 'student') STATE.lastStuCls = $('#lCls').value;
     try { const u = await login($('#lUser').value, $('#lPass').value, $('#lCls').value); STATE.needCls = false;
       if (getToken()) await pullNow(false);
       const want = role === 'admin' ? 'owner' : role; if (approved(u) && u.role !== want) toast(`Logged in as ${u.role === 'owner' ? 'admin' : u.role} – opening your dashboard`);
       go(approved(u) ? landingFor(u) : 'pending');
-    } catch (err) { if (/^choose_class/.test(err.message)) { STATE.needCls = true; $('#lClsBox').classList.remove('hidden'); } throw err; }
+    } catch (err) { if (/^choose_class/.test(err.message)) { STATE.needCls = true; if ($('#lClsBox')) $('#lClsBox').classList.remove('hidden'); else $('#lCls').focus(); } throw err; }
   });
 }
 function viewPending(u) {
@@ -1161,7 +1193,7 @@ function bindPassword(after) {
 }
 function viewSettings() {
   const u = sessionUser(), stu = u.role === 'student';
-  if (u.mustChange) { app().innerHTML = `<div class="card annbar pin" style="cursor:default"><b>🔑 Please set a new password</b> – the admin gave you a temporary password. <span class="ur">نیا پاس ورڈ بنائیں</span></div>` + passwordHTML() + '<div class="card"><button class="btn red" id="pOut">Log out</button></div>';
+  if (u.mustChange) { app().innerHTML = `<div class="card annbar pin" style="cursor:default"><b>🔑 Please set a new password</b> – the school gave you a temporary password. <span class="ur">نیا پاس ورڈ بنائیں</span></div>` + passwordHTML() + '<div class="card"><button class="btn red" id="pOut">Log out</button></div>';
     bindPassword(() => render()); $('#pOut').onclick = () => logout(); return; }
   app().innerHTML = (stu ? `<div class="card"><h2>My account <span class="ur">میرا اکاؤنٹ</span></h2><p><b>${esc(u.name)}</b> · ${esc(u.cls)} · Roll # ${esc(u.roll)} · username <code>${esc(u.username)}</code></p>
       <label>Recovery email (optional) <span class="ur">ای میل</span></label><input id="pEmail" type="email" inputmode="email" autocapitalize="none" value="${esc(u.email || '')}" placeholder="for a password reset code">
@@ -1223,7 +1255,7 @@ boot();
 
 export {addClass, queueStudentUpdate, addIssue, sameClass, avatarHTML, classRoster, findTest, db, $, $$, esc, uid, ymd, parseD, addDays, today, fmtD, pct, p1, r1, grade, gradeBadge, toast, weekRange, monthRange, daysBetween,
   save, ck, splitCk, testCk, me, isAdmin, isOwner, myClasses, canEditTest, mySubjects, allClassKeys, allSubjects, applyBranding, testsIn, classAvg, go, STATE,
-  render, app, opts, meStudent, sessionUser, updateNotesBadge, postJSON, getJSON, hashPw, logout, chipsHTML, bindChips, download, toCSV, flatRows, syncNow, pullNow, pendingCount,
+  render, app, opts, meStudent, sessionUser, updateNotesBadge, postJSON, getJSON, hashPw, logout, setStudentLogin, suggestStudentUsername, tempPassword, checkStudentLogin, loginPayload, chipsHTML, bindChips, download, toCSV, flatRows, syncNow, pullNow, pendingCount,
   DEFAULT_NAME, rememberRoster, setUserStatus, adminResetPassword, adminSetEmail, fullName, splitName, contactHTML, SEC_QS, isLeave, backupHTML, bindBackup, backupJSON, exportCSV, online, getToken, annFor, annUnread, annVisible, updateBell, bindAnnFiles,
   passMark, isPass, passBadge, subjectsForClass, loadMod, approved, newPin, VIEW_NAME, mergeAnn, addSubject, addRosterStudent, renameSubjectLocal, tilesHTML, landingFor, contactInfo, waLink, honorMiniHTML};
 function VIEW_NAME() { return VIEW; }

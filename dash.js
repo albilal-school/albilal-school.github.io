@@ -2,7 +2,7 @@
    Loaded only when a dashboard/report screen is opened. Chart.js (vendored, MIT) is loaded on demand too. */
 import {db, $, $$, esc, ymd, parseD, addDays, today, fmtD, pct, p1, r1, grade, gradeBadge, toast, weekRange, monthRange, daysBetween,
   save, ck, splitCk, testCk, me, isAdmin, myClasses, allClassKeys, allSubjects, applyBranding, testsIn, classAvg, go, STATE,
-  render, app, opts, download, DEFAULT_NAME, setUserStatus, backupHTML, bindBackup, online, getJSON, sessionUser, isOwner, adminResetPassword, adminSetEmail, fullName, SEC_QS, newPin, rememberRoster, meStudent, annFor, tilesHTML, addSubject, renameSubjectLocal, addRosterStudent, passMark, isPass, passBadge, splitName, postJSON, pullNow, honorMiniHTML, classRoster, avatarHTML, addClass, queueStudentUpdate, addIssue, sameClass} from './app.js';
+  render, app, opts, download, DEFAULT_NAME, setUserStatus, backupHTML, bindBackup, online, getJSON, sessionUser, isOwner, adminResetPassword, adminSetEmail, fullName, SEC_QS, newPin, rememberRoster, meStudent, annFor, tilesHTML, addSubject, renameSubjectLocal, addRosterStudent, passMark, isPass, passBadge, splitName, postJSON, pullNow, honorMiniHTML, classRoster, avatarHTML, addClass, queueStudentUpdate, addIssue, sameClass, setStudentLogin, suggestStudentUsername, tempPassword, checkStudentLogin, loginPayload} from './app.js';
 
 let chartP = null;
 function ensureChart() {
@@ -133,6 +133,29 @@ function bindMySubjects() {
   $('#tSubNew').onkeydown = e => { if (e.key === 'Enter') b.click(); };
   b.onclick = () => { try { const r = addSubject($('#tSubNew').value); toast(r.existed ? `"${r.name}" already exists – added to your subjects` : `Subject "${r.name}" added ✓`); render(); } catch (e) { toast(e.message); } };
 }
+/* v14: student portal login fields (used when a teacher / the admin adds a student) + one-time credential slip */
+function loginFieldsHTML(p) {
+  return `<div class="login-fields"><label class="chk"><input type="checkbox" id="${p}MkLogin" checked> 🔐 Create student portal login <span class="ur">طالب علم کا لاگ ان</span></label>
+    <div class="row" id="${p}LoginRow"><div><label>Username</label><input id="${p}User" autocapitalize="none" autocomplete="off" spellcheck="false" placeholder="filled from class + roll"></div>
+      <div><label>Temporary password (6+)</label><div class="pw-gen"><input id="${p}Pw" autocomplete="off" spellcheck="false" value="${esc(tempPassword())}"><button type="button" class="btn sm sec" id="${p}PwGen" title="New random password">🎲</button></div></div></div>
+    <small class="muted">The student opens <b>Student Login</b>, chooses this class, types the roll number (or username) and this password, then sets a new password.</small></div>`;
+}
+function bindLoginFields(p, clsSel, rollSel) {
+  const u = $('#' + p + 'User'); if (!u) return; let touched = false;
+  const fill = () => { if (!touched) u.value = $(rollSel).value.trim() ? suggestStudentUsername($(clsSel).value, $(rollSel).value.trim()) : ''; };
+  u.oninput = () => { touched = !!u.value.trim(); }; $(rollSel).addEventListener('input', fill); $(clsSel).addEventListener('change', fill); fill();
+  $('#' + p + 'PwGen').onclick = () => { $('#' + p + 'Pw').value = tempPassword(); };
+  $('#' + p + 'MkLogin').onchange = e => $('#' + p + 'LoginRow').classList.toggle('hidden', !e.target.checked);
+}
+const loginFieldVals = p => $('#' + p + 'MkLogin') && $('#' + p + 'MkLogin').checked ? {username: $('#' + p + 'User').value.trim(), password: $('#' + p + 'Pw').value.trim()} : {};
+function credSlipHTML() {
+  const c = STATE.credSlip; if (!c || (c.at && Date.now() - c.at > 15 * 60000)) return ''; // shown once, briefly – never stored
+  return `<div class="card cred-slip" id="credSlip"><div class="card-h"><h3>✅ Student login ready – give these to the student</h3><button class="btn sm sec" id="credX">✕ Done</button></div>
+    <div class="cred-grid"><div><span>Name</span><b>${esc(c.name || '–')}</b></div><div><span>Class &amp; section</span><b>${esc(c.cls)}</b></div><div><span>Roll number</span><b>${esc(c.roll)}</b></div>
+      <div><span>Username</span><b>${esc(c.username)}</b></div><div><span>Temporary password</span><b class="mono">${esc(c.password)}</b></div></div>
+    <p class="muted">${c.queued ? '⟳ Saved on this phone – the login works after it syncs (automatic when online). ' : ''}Shown only now. The student must change this password at the first login. Forgot it later? The admin can set a new one (old passwords are never shown).</p></div>`;
+}
+function bindCredSlip() { if ($('#credX')) $('#credX').onclick = () => { STATE.credSlip = null; render(); }; }
 /* teacher adds students to their own classes (owner edits/deletes in Admin → Students) */
 function myStudentsCardHTML() {
   const m = me(); if (!m) return ''; const cls = myClasses(); if (!cls.length) return '';
@@ -147,10 +170,16 @@ function myStudentsCardHTML() {
       <div class="row"><div><label>Roll Number *</label><input id="msRoll" inputmode="numeric" value="${ed ? esc(ed.roll) : ''}">${ed ? '<small class="muted">Change only if wrong – must be unique in the class; old marks move to the new roll.</small>' : ''}</div><div><label>Class &amp; section *</label><select id="msCls2" ${ed ? 'disabled' : ''}>${opts(cls, c)}</select></div></div>
       <div class="row"><div><label>First Name *</label><input id="msFirst" value="${ed ? esc(ed.first || splitName(ed).first) : ''}"></div><div><label>Last Name *</label><input id="msLast" value="${ed ? esc(ed.last ?? splitName(ed).last) : ''}"></div></div>
       <div class="row"><div><label>Father's Name *</label><input id="msFather" value="${ed ? esc(ed.father || '') : ''}"></div><div><label>Contact Number <span class="ur">رابطہ نمبر</span></label><input id="msPhone" type="tel" inputmode="tel" placeholder="03001234567" maxlength="20" value="${ed ? esc(ed.phone || '') : ''}"></div></div>
+      ${ed ? '' : loginFieldsHTML('ms')}
       ${ed ? '<button class="btn" id="msSave">💾 Save changes</button> <button class="btn sec" id="msCancel">Cancel</button>' : '<button class="btn" id="msAdd">➕ Add student</button>'}
-      <p class="muted">The student is ready for marks entry at once. To log in, the student registers on the Student page with the same class + roll number (or the admin approves) – the account links to this entry. Deleting hides the student but keeps all their marks; the admin can restore.</p></div>
+      <p class="muted">The student is ready for marks entry at once. With “Create student portal login” ticked the student can log in straight away (class + roll number or username + password). Deleting hides the student but keeps all their marks; the admin can restore.</p></div>
+    ${credSlipHTML()}
+    ${STATE.msLogin && list.some(x => x.roll === STATE.msLogin) && !acct(STATE.msLogin) ? `<div class="card login-box" id="msLgBox"><h3>🔐 Create login – roll ${esc(STATE.msLogin)}, ${esc(c)}</h3>
+      <div class="row"><div><label>Username</label><input id="mlUser" autocapitalize="none" autocomplete="off" spellcheck="false" value="${esc(suggestStudentUsername(c, STATE.msLogin))}"></div>
+        <div><label>Temporary password (6+)</label><div class="pw-gen"><input id="mlPw" autocomplete="off" spellcheck="false" value="${esc(tempPassword())}"><button type="button" class="btn sm sec" id="mlPwGen">🎲</button></div></div></div>
+      <button class="btn" id="mlSave">🔐 Create login</button> <button class="btn sec" id="mlCancel">Cancel</button><p class="muted">Needs internet. Only the admin can change a login after it is created.</p></div>` : ''}
     ${list.length ? `<div class="tbl-wrap"><table id="msTbl" class="ptbl"><tr><th>Roll</th><th>Name</th><th>Father's name</th><th>Contact No</th><th>Login account</th><th></th></tr>${list.map(x => { const a = acct(x.roll), ph = x.phone || (a && a.phone) || '';
-      return `<tr data-q="${esc([x.roll, fullName(x), x.father, ph].join(' ').toLowerCase())}"><td>${esc(x.roll)}</td><td class="pname">${esc(fullName(x))}${x.addedBy ? ` <small class="muted">· added by ${esc(x.addedBy)}</small>` : ''}${x.isNew || x.dirty ? ' <span class="badge warn">queued</span>' : ''}</td><td>${esc(x.father || '–')}</td><td>${ph ? `<a href="tel:${esc(ph.replace(/\s/g, ''))}">${esc(ph)}</a>` : '-'}</td><td>${a ? `<span class="badge ${a.status === 'approved' ? '' : 'warn'}">${esc(a.status)}</span>` : '<span class="muted">not registered</span>'}</td>
+      return `<tr data-q="${esc([x.roll, fullName(x), x.father, ph].join(' ').toLowerCase())}"><td>${esc(x.roll)}</td><td class="pname">${esc(fullName(x))}${x.addedBy ? ` <small class="muted">· added by ${esc(x.addedBy)}</small>` : ''}${x.isNew || x.dirty ? ' <span class="badge warn">queued</span>' : ''}</td><td>${esc(x.father || '–')}</td><td>${ph ? `<a href="tel:${esc(ph.replace(/\s/g, ''))}">${esc(ph)}</a>` : '-'}</td><td>${a ? `<span class="badge ${a.status === 'approved' ? '' : 'warn'}">${esc(a.status)}</span><div class="muted" style="font-size:12px">@${esc(a.username)}</div>` : x.login ? `<span class="badge warn">login queued</span><div class="muted" style="font-size:12px">@${esc(x.login.username)}</div>` : x.isNew ? '<span class="muted">no login</span>' : `<button class="btn sm" data-mslogin="${esc(x.roll)}">🔐 Create login</button>`}</td>
         <td class="acts"><button class="btn sm sec" data-msed="${esc(x.roll)}">Edit</button><button class="btn sm red" data-msdel="${esc(x.roll)}">Delete</button></td></tr>`; }).join('')}</table></div>`
       : '<div class="muted">No students in this class yet.</div>'}</div>`;
 }
@@ -162,8 +191,17 @@ function bindMyStudents() {
     toast(r.existed ? `${r.key} already exists – selected it` : `Class ${r.key} added ✓${navigator.onLine ? '' : ' (will sync when online)'}`); render(); } catch (err) { toast(err.message); } };
   const qf = () => { const q = ($('#msQ').value || '').trim().toLowerCase(); $$('#msTbl tr[data-q]').forEach(r => r.classList.toggle('hidden', !!q && !q.split(/\s+/).every(w => r.dataset.q.includes(w)))); };
   $('#msQ').oninput = qf;
-  if ($('#msAdd')) $('#msAdd').onclick = () => { try { const r = addRosterStudent({roll: $('#msRoll').value, first: $('#msFirst').value, last: $('#msLast').value, father: $('#msFather').value, phone: $('#msPhone').value, cls: $('#msCls2').value});
-      toast(`Roll ${r.roll} added to ${r.cls} ✓`); STATE.myStuCls = r.cls; STATE.scrollTo = 'myStuCard'; render(); } catch (e) { toast(e.message); } };
+  if ($('#msAdd')) { bindLoginFields('ms', '#msCls2', '#msRoll'); $('#msAdd').onclick = () => { try { const lg = loginFieldVals('ms');
+      const r = addRosterStudent({roll: $('#msRoll').value, first: $('#msFirst').value, last: $('#msLast').value, father: $('#msFather').value, phone: $('#msPhone').value, cls: $('#msCls2').value, ...lg});
+      STATE.credSlip = r.username ? {cls: r.cls, roll: r.roll, username: r.username, password: lg.password, name: `${$('#msFirst').value.trim()} ${$('#msLast').value.trim()}`, queued: !online(), at: Date.now()} : null;
+      toast(`Roll ${r.roll} added to ${r.cls} ✓${r.username ? ' · login ' + r.username : ''}`); STATE.myStuCls = r.cls; STATE.scrollTo = r.username ? 'credSlip' : 'myStuCard'; render(); } catch (e) { toast(e.message); } }; }
+  bindCredSlip();
+  $$('[data-mslogin]').forEach(b => b.onclick = () => { STATE.msLogin = b.dataset.mslogin; STATE.scrollTo = 'msLgBox'; render(); });
+  if ($('#msLgBox')) { $('#mlPwGen').onclick = () => { $('#mlPw').value = tempPassword(); }; $('#mlCancel').onclick = () => { STATE.msLogin = ''; render(); };
+    $('#mlSave').onclick = async e => { const roll = STATE.msLogin, rec = (db.students[c] || []).find(x => x.roll === roll), pw = $('#mlPw').value.trim(); e.target.disabled = true;
+      try { const r = await setStudentLogin({cls: c, roll, username: $('#mlUser').value, password: pw, force: true}); STATE.msLogin = '';
+        STATE.credSlip = {cls: c, roll, username: r.username, password: pw, name: rec ? fullName(rec) : '', at: Date.now()}; STATE.scrollTo = 'credSlip'; toast('Login created ✓'); render(); }
+      catch (err) { e.target.disabled = false; toast(err.message); } }; }
   if ($('#msSave')) $('#msSave').onclick = async () => { const rec = (db.students[c] || []).find(x => x.roll === STATE.msEdit); if (!rec) return;
     const first = $('#msFirst').value.trim(), last = $('#msLast').value.trim(), father = $('#msFather').value.trim(), phone = $('#msPhone').value.trim(), roll = $('#msRoll').value.trim();
     if (!first || !last || !father) return toast('First, last and father\'s name are required');
@@ -285,10 +323,10 @@ export async function viewStudentDash() {
 const optsKV = (arr, sel) => arr.map(([v, l]) => `<option value="${esc(v)}" ${v === sel ? 'selected' : ''}>${esc(l)}</option>`).join('');
 const ago = iso => { if (!iso) return '–'; const m = (Date.now() - new Date(iso)) / 60000; return m < 2 ? 'just now' : m < 60 ? `${Math.round(m)} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : fmtD(String(iso).slice(0, 10)); };
 const stBadge = st => `<span class="badge st-${esc(st || 'none')} ${st === 'approved' ? '' : st === 'pending' ? 'warn' : st ? 'bad' : ''}">${st ? esc(st) : 'no login'}</span>`;
-function statusBtns(u) {
+function statusBtns(u, noReset) { // v14: students get the 🔐 username/password box instead of the plain reset
   const b = (st, l, c = '') => `<button class="btn sm ${c}" data-appr="${esc(u.username)}" data-st="${st}">${l}</button>`;
   return (u.status === 'pending' ? b('approved', '✓ Approve') + b('rejected', '✕ Reject', 'red') : u.status === 'approved' ? b('disabled', '⏸ Disable', 'red') : b('approved', u.status === 'rejected' ? '✓ Approve' : '▶ Enable'))
-    + `<button class="btn sm sec" data-rpw="${esc(u.username)}">🔑 Reset password</button><button class="btn sm sec" data-em="${esc(u.username)}">✉️ Email</button>`;
+    + (noReset ? '' : `<button class="btn sm sec" data-rpw="${esc(u.username)}">🔑 Reset password</button>`) + `<button class="btn sm sec" data-em="${esc(u.username)}">✉️ Email</button>`;
 }
 /** full display name: name → first + last → username (never blank / cut) */
 const dispName = u => String(u.name || '').trim() || [u.first, u.last].filter(Boolean).join(' ').trim() || u.username || '–';
@@ -414,9 +452,32 @@ function studentsSecHTML() {
       ${list.map(r => { const q = [r.roll, r.name, r.father, r.cls, r.acct ? r.acct.username : '', r.acct ? r.acct.email : ''].join(' ').toLowerCase();
         return `<tr data-q="${esc(q)}" data-sk="${esc(r.cls + '|' + r.roll)}"><td>${esc(r.roll)}</td><td class="pname"><b>${esc(r.name || (r.acct ? dispName(r.acct) : '–'))}</b>${r.acct ? `<div class="muted" style="font-size:12px">@${esc(r.acct.username)}${r.acct.email ? ' · ✉️ ' + esc(r.acct.email) : ''}</div>` : ''}${r.addedBy ? `<div class="muted" style="font-size:12px">added by ${esc(r.addedBy)}</div>` : ''}</td>
           <td>${esc(r.father || '–')}</td><td>${esc(r.cls)}</td><td>${stBadge(r.status)}</td><td class="num">${r.pct == null ? '–' : gradeBadge(r.pct)}</td>
-          <td class="acts">${r.acct ? statusBtns(r.acct) : ''}<button class="btn sm sec" data-sres="${esc(r.cls + '|' + r.roll)}">📈 Results</button>${r.roster ? `<button class="btn sm sec" data-sed2="${esc(r.cls + '|' + r.roll)}">✏️ Edit</button><button class="btn sm red" data-sdel2="${esc(r.cls + '|' + r.roll)}">🗑 Delete</button>` : ''}</td></tr>`; }).join('')}</table></div>`
+          <td class="acts acts-wrap"><button class="btn sm" data-slog="${esc(r.cls + '|' + r.roll)}">🔐 ${r.acct ? 'Login / password' : 'Create login'}</button>${r.acct ? statusBtns(r.acct, true) : ''}<button class="btn sm sec" data-sres="${esc(r.cls + '|' + r.roll)}">📈 Results</button>${r.roster ? `<button class="btn sm sec" data-sed2="${esc(r.cls + '|' + r.roll)}">✏️ Edit</button><button class="btn sm red" data-sdel2="${esc(r.cls + '|' + r.roll)}">🗑 Delete</button>` : ''}</td></tr>`; }).join('')}</table></div>`
       : '<div class="empty">No students match.</div>'}
-    <p class="muted">Students register on the “Student Login” page; teachers can also add students to their classes. A registration links to the class list entry with the same class + roll number.</p></div>`;
+    <p class="muted">Students register on the “Student Login” page, or a teacher / you add them with a login. <b>🔐</b> sets or resets any student's username and password (existing passwords are never shown). A registration links to the class list entry with the same class + roll number.</p></div>`;
+}
+/* v14: owner sets / resets a student's username + password */
+function studentLoginBoxHTML() {
+  const k = STATE.slKey; if (!k) return '';
+  const i = k.lastIndexOf('|'), cls = k.slice(0, i), roll = k.slice(i + 1), a = db.users.find(u => u.role === 'student' && u.cls === cls && String(u.roll) === roll && u.status !== 'rejected');
+  const rec = (db.students[cls] || []).find(x => x.roll === roll), name = rec ? fullName(rec) : a ? dispName(a) : '';
+  return `<div class="card login-box" id="slBox"><div class="card-h"><h3>🔐 Student login – ${esc(name || 'roll ' + roll)}</h3><button class="btn sm sec" id="slX">✕</button></div>
+    <div class="cred-grid"><div><span>Class &amp; section</span><b>${esc(cls)}</b></div><div><span>Roll number</span><b>${esc(roll)}</b></div><div><span>Current username</span><b>${a ? esc(a.username) : '<span class="muted">no login yet</span>'}</b></div><div><span>Status</span><b>${a ? stBadge(a.status) : '–'}</b></div></div>
+    <div class="row"><div><label>Username</label><input id="slUser" autocapitalize="none" autocomplete="off" spellcheck="false" value="${esc(a ? a.username : suggestStudentUsername(cls, roll))}"></div>
+      <div><label>New password (6+)</label><div class="pw-gen"><input id="slPw" autocomplete="new-password" spellcheck="false" value="${esc(tempPassword())}"><button type="button" class="btn sm sec" id="slPwGen">🎲</button></div></div></div>
+    <label class="chk"><input type="checkbox" id="slForce" checked> Must change the password at next login</label>
+    <button class="btn" id="slSave">${a ? '💾 Save username &amp; password' : '🔐 Create login'}</button>
+    <p class="muted">The old password is never shown – type a new one and tell the student. Changing the username also needs a new password. The student is signed out on all phones${a && a.status === 'pending' ? ' and this pending account is approved' : ''}${a && ['disabled', 'rejected'].includes(a.status) ? '. This account is disabled – enable it to let the student log in' : ''}.</p></div>`;
+}
+function bindStudentLoginBox() {
+  $$('[data-slog]').forEach(b => b.onclick = () => { STATE.slKey = b.dataset.slog; render(); setTimeout(() => $('#slBox') && $('#slBox').scrollIntoView({block: 'center'}), 60); });
+  if (!$('#slBox')) return; const k = STATE.slKey, i = k.lastIndexOf('|'), cls = k.slice(0, i), roll = k.slice(i + 1);
+  $('#slX').onclick = () => { STATE.slKey = ''; render(); }; $('#slPwGen').onclick = () => { $('#slPw').value = tempPassword(); };
+  $('#slSave').onclick = async e => { const pw = $('#slPw').value.trim(); e.target.disabled = true;
+    try { const r = await setStudentLogin({cls, roll, username: $('#slUser').value, password: pw, force: $('#slForce').checked}); STATE.slKey = '';
+      const rec = (db.students[cls] || []).find(x => x.roll === roll); STATE.credSlip = {cls, roll, username: r.username, password: pw, name: rec ? fullName(rec) : '', at: Date.now()};
+      toast(r.created ? `Login created: ${r.username} ✓` : `Login updated: ${r.username} ✓`); render(); setTimeout(() => $('#credSlip') && $('#credSlip').scrollIntoView({block: 'center'}), 60); }
+    catch (err) { e.target.disabled = false; toast(err.message); } };
 }
 function bindPeopleSec() {
   const live = (inp, tbl, k) => { const el = $(inp); if (!el) return; const f = () => { const q = el.value.trim().toLowerCase(); STATE[k] = el.value;
@@ -473,7 +534,7 @@ export async function viewAdmin() {
   <div class="card"><h3>Most leaves (period) <span class="ur">سب سے زیادہ چھٹیاں</span></h3>${mostLeaves(tests)}</div>
 `;
   else if (sec === 'teachers') main = teachersSecHTML();
-  else if (sec === 'students') main = studentsSecHTML() + deletedStudentsHTML() + studentsHTML();
+  else if (sec === 'students') main = credSlipHTML() + studentLoginBoxHTML() + studentsSecHTML() + deletedStudentsHTML() + studentsHTML();
   else if (sec === 'history') main = historyHTML();
   else if (sec === 'classes') main = listsHTML();
   else if (sec === 'settings') main = `  <div class="card"><h2>School settings <span class="ur">اسکول کی ترتیبات</span></h2>
@@ -496,7 +557,7 @@ export async function viewAdmin() {
   app().innerHTML = `<div class="admin-layout">${side}<div class="admin-main" id="adminMain">${main}${['teachers', 'students'].includes(sec) ? peopleBoxesHTML() : ''}</div></div>`;
   $$('[data-asec]').forEach(b => b.onclick = () => { STATE.aSec = b.dataset.asec; render(); window.scrollTo(0, 0); });
   if (sec === 'teachers' || sec === 'students') { bindPeople(); bindPeopleSec(); }
-  if (sec === 'students') { bindStudents(); bindDeletedStudents(); }
+  if (sec === 'students') { bindStudents(); bindDeletedStudents(); bindStudentLoginBox(); bindCredSlip(); }
   if (sec === 'history') bindHistory();
   if (sec === 'classes') bindLists();
   if (sec === 'share') bindBackup();
@@ -688,6 +749,7 @@ function studentsHTML() {
       <div class="row"><div><label>Roll Number *</label><input id="sRoll" inputmode="numeric" value="${esc(ed.roll || '')}"></div><div><label>Class &amp; section *</label><select id="sCls2">${opts(all, cls)}</select></div></div>
       <div class="row"><div><label>First Name *</label><input id="sFirst" value="${esc(ed.first || (ed.name || '').split(' ')[0] || '')}"></div><div><label>Last Name *</label><input id="sLast" value="${esc(ed.last || (ed.name || '').split(' ').slice(1).join(' '))}"></div></div>
       <label>Father's Name *</label><input id="sFather" value="${esc(ed.father || '')}">
+      ${STATE.sEdit ? '' : loginFieldsHTML('sa')}
       <button class="btn" id="sSave">${STATE.sEdit ? 'Save changes' : '＋ Add student'}</button>${STATE.sEdit ? '<button class="btn sec" id="sCancel">Cancel</button>' : ''}</div>
     ${list.length ? `<div class="tbl-wrap"><table id="stuTbl"><tr><th>Roll</th><th>Name</th><th>Father's name</th><th></th></tr>${list.map(x => `<tr><td>${esc(x.roll)}</td><td>${esc(fullName(x))}</td><td>${esc(x.father || '–')}</td>
       <td style="white-space:nowrap"><button class="btn sm sec" data-sed="${esc(x.roll)}">✏️ Edit</button><button class="btn sm red" data-sdel="${esc(x.roll)}">✕</button></td></tr>`).join('')}</table></div>` : '<div class="muted">No students in this class yet.</div>'}</div>`;
@@ -698,16 +760,21 @@ function bindStudents() {
   if ($('#sCancel')) $('#sCancel').onclick = () => { STATE.sEdit = ''; render(); };
   $$('[data-sdel]').forEach(b => b.onclick = () => { const cls = STATE.sCls, r = b.dataset.sdel; if (!confirm(`Remove roll ${r} from ${cls}? Old test marks stay.`)) return;
     db.students[cls] = (db.students[cls] || []).filter(x => x.roll !== r); const {grade: g, section} = splitCk(cls); db.deletedStudents.push(`${g}|${section}|${r}`); save(); window.syncNow(false); render(); });
+  if (!STATE.sEdit) bindLoginFields('sa', '#sCls2', '#sRoll');
   $('#sSave').onclick = () => {
     const roll = $('#sRoll').value.trim(), cls = $('#sCls2').value, first = $('#sFirst').value.trim(), last = $('#sLast').value.trim(), father = $('#sFather').value.trim();
     if (!roll || !cls || !first || !last || !father) return toast('All fields are required');
+    const lg = STATE.sEdit ? {} : loginFieldVals('sa'); let login;
+    if (lg.username || lg.password) { if (db.users.some(u => u.role === 'student' && u.cls === cls && String(u.roll) === roll && u.status !== 'rejected')) return toast(`Roll ${roll} in ${cls} already has a login – use 🔐 in the list to change it`);
+      try { const un = checkStudentLogin(lg.username, lg.password, cls, roll); login = loginPayload(un, lg.password, true); } catch (e) { return toast(e.message); } }
     const old = STATE.sEdit, oldCls = STATE.sCls, list = db.students[cls] = db.students[cls] || [];
     if (list.some(x => x.roll === roll && !(cls === oldCls && roll === old))) return toast(`Roll ${roll} already exists in ${cls}`);
     let rec = old ? (db.students[oldCls] || []).find(x => x.roll === old) : null;
     if (rec && (cls !== oldCls || roll !== old)) { db.students[oldCls] = db.students[oldCls].filter(x => x !== rec); const {grade: g, section} = splitCk(oldCls); db.deletedStudents.push(`${g}|${section}|${old}`); }
     if (rec) rec.dirty = true; if (!rec || cls !== oldCls || roll !== old) { rec = {...(rec || {}), isNew: true, addedBy: (rec && rec.addedBy) || (isOwner() ? 'admin' : (me() || {}).name)}; list.push(rec); }
-    Object.assign(rec, {roll, first, last, father, name: `${first} ${last}`});
-    db.settings.rosterDirty = true; STATE.sEdit = ''; STATE.sCls = cls; save(); toast('Student saved ✓'); window.syncNow(false); render();
+    Object.assign(rec, {roll, first, last, father, name: `${first} ${last}`}, login ? {login} : {});
+    STATE.credSlip = login ? {cls, roll, username: login.username, password: lg.password, name: `${first} ${last}`, queued: !online(), at: Date.now()} : STATE.credSlip;
+    db.settings.rosterDirty = true; STATE.sEdit = ''; STATE.sCls = cls; save(); toast('Student saved ✓' + (login ? ' · login ' + login.username : '')); window.syncNow(false); render();
   };
 }
 function listsHTML() {
